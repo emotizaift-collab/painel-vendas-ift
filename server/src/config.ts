@@ -1,0 +1,237 @@
+/**
+ * Carrega e grava a configuracao do painel.
+ *
+ * config/event-config.default.json  -> padrao versionado no repositorio
+ * data/event-config.json            -> o que a interface grava (tem prioridade)
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import type { AliasConfig, AppConfig, EventEdition, TicketTypeConfig, Vigencia } from '../../shared/types.js';
+import { nomeDoApelido } from '../../shared/types.js';
+
+/**
+ * Raiz do projeto. Sobe os diretorios ate achar o package.json, para funcionar
+ * tanto rodando o TypeScript direto (server/src) quanto o build (dist/server/src).
+ */
+function findRoot(): string {
+  let dir = path.dirname(fileURLToPath(import.meta.url));
+  for (let i = 0; i < 6; i += 1) {
+    if (fs.existsSync(path.join(dir, 'package.json'))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return process.cwd();
+}
+
+export const ROOT = findRoot();
+
+const DEFAULT_PATH = path.join(ROOT, 'config', 'event-config.default.json');
+const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(ROOT, 'data');
+const OVERRIDE_PATH = path.join(DATA_DIR, 'event-config.json');
+
+function readJson(file: string): AppConfig {
+  return JSON.parse(fs.readFileSync(file, 'utf8')) as AppConfig;
+}
+
+export function loadDefaultConfig(): AppConfig {
+  return readJson(DEFAULT_PATH);
+}
+
+export function loadConfig(): AppConfig {
+  if (fs.existsSync(OVERRIDE_PATH)) {
+    try {
+      return validateConfig(readJson(OVERRIDE_PATH));
+    } catch (error) {
+      console.error('[config] arquivo salvo invalido, usando o padrao:', error);
+    }
+  }
+  return validateConfig(loadDefaultConfig());
+}
+
+export function saveConfig(config: AppConfig): AppConfig {
+  const validated = validateConfig(config);
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(OVERRIDE_PATH, JSON.stringify(validated, null, 2), 'utf8');
+  return validated;
+}
+
+export function resetConfig(): AppConfig {
+  if (fs.existsSync(OVERRIDE_PATH)) fs.rmSync(OVERRIDE_PATH);
+  return loadConfig();
+}
+
+/** Barra configuracoes quebradas antes que elas derrubem o painel. */
+export function validateConfig(config: AppConfig): AppConfig {
+  if (typeof config.ticketPrice !== 'number' || !(config.ticketPrice > 0)) {
+    throw new Error('ticketPrice precisa ser um numero maior que zero');
+  }
+  if (!Array.isArray(config.eventLines) || config.eventLines.length === 0) {
+    throw new Error('e preciso ter pelo menos uma linha de evento');
+  }
+
+  const lineIds = new Set<string>();
+  const editionIds = new Set<string>();
+  for (const line of config.eventLines) {
+    if (!line.id || !line.label) throw new Error('toda linha de evento precisa de id e nome');
+    if (line.id === 'todos') throw new Error('"todos" e um id reservado');
+    if (lineIds.has(line.id)) throw new Error(`linha de evento duplicada: ${line.id}`);
+    lineIds.add(line.id);
+
+    if (!Array.isArray(line.editions) || line.editions.length === 0) {
+      throw new Error(`a linha "${line.label}" precisa de pelo menos uma edicao`);
+    }
+    for (const edition of line.editions) {
+      if (!edition.id || !edition.label) throw new Error('toda edicao precisa de id e nome');
+      if (editionIds.has(edition.id)) throw new Error(`edicao duplicada: ${edition.id}`);
+      editionIds.add(edition.id);
+      if (!Array.isArray(edition.aliases)) edition.aliases = [];
+      edition.aliases = edition.aliases
+        .map((alias) => limparApelido(alias, edition.label))
+        .filter((alias): alias is AliasConfig => alias !== null);
+      edition.current = Boolean(edition.current);
+      validarVigencia(edition.vigencia, edition.label);
+      if (edition.vigencia && !edition.vigencia.de && !edition.vigencia.ate) delete edition.vigencia;
+      normalizarContagemRegressiva(edition);
+    }
+  }
+
+  config.ticketTypes = migrarTiposDeIngresso(config.ticketTypes);
+  if (config.ticketTypes.length === 0) {
+    throw new Error('e preciso ter pelo menos um tipo de ingresso');
+  }
+  const tipoIds = new Set<string>();
+  for (const tipo of config.ticketTypes) {
+    if (!tipo.id || !tipo.label) throw new Error('todo tipo de ingresso precisa de id e nome');
+    if (tipoIds.has(tipo.id)) throw new Error(`tipo de ingresso duplicado: ${tipo.id}`);
+    tipoIds.add(tipo.id);
+    if (!Array.isArray(tipo.aliases)) tipo.aliases = [];
+    tipo.aliases = tipo.aliases.map((alias) => String(alias).trim()).filter(Boolean);
+    if (typeof tipo.cadeiras !== 'number' || tipo.cadeiras < 0 || !Number.isInteger(tipo.cadeiras)) {
+      throw new Error(`"${tipo.label}": cadeiras precisa ser um numero inteiro de 0 para cima`);
+    }
+    if (tipo.preco !== null && (typeof tipo.preco !== 'number' || tipo.preco < 0)) {
+      throw new Error(`"${tipo.label}": preco precisa ser um numero de 0 para cima, ou vazio`);
+    }
+    tipo.contaComoVenda = Boolean(tipo.contaComoVenda);
+    if (tipo.contaComoVenda && tipo.cadeiras === 0) {
+      throw new Error(
+        `"${tipo.label}" conta como venda mas ocupa 0 cadeiras. ` +
+          'Um ingresso vendido precisa levar pelo menos uma pessoa ao evento.',
+      );
+    }
+  }
+
+  for (const key of ['leads', 'buyers', 'traffic'] as const) {
+    const source = config.sources?.[key];
+    if (!source?.spreadsheetId || !source?.tab) {
+      throw new Error(`a fonte "${key}" precisa de spreadsheetId e nome da aba`);
+    }
+    if (typeof source.headerRow !== 'number' || source.headerRow < 1) source.headerRow = 1;
+  }
+
+  return config;
+}
+
+/**
+ * A vigencia e comparada como texto (AAAA-MM-DD < AAAA-MM-DD), que so funciona
+ * nesse formato. Uma data escrita como 04/09/2026 nao daria erro em lugar
+ * nenhum: o apelido simplesmente nunca casaria, e os leads sumiriam calados —
+ * que foi exatamente o estrago que a vigencia veio consertar. Por isso barrar
+ * aqui, na hora de salvar, e nao deixar passar.
+ */
+function validarVigencia(vigencia: Vigencia | undefined, rotulo: string): void {
+  if (!vigencia) return;
+  const { de, ate } = vigencia;
+  for (const [campo, valor] of [['de', de], ['ate', ate]] as const) {
+    if (valor === undefined) continue;
+    if (typeof valor !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(valor)) {
+      throw new Error(
+        `"${rotulo}": a data "${campo}" da vigencia precisa estar no formato ` +
+          `AAAA-MM-DD (recebi "${valor}")`,
+      );
+    }
+  }
+  if (de && ate && de > ate) {
+    throw new Error(`"${rotulo}": a vigencia comeca (${de}) depois de terminar (${ate})`);
+  }
+}
+
+/**
+ * Valida (e limpa) a data do evento e a meta de vendas de uma edicao — os dois
+ * campos que alimentam a contagem regressiva.
+ *
+ * Campo vazio some, em vez de virar "" ou NaN salvo na configuracao. A data
+ * exige AAAA-MM-DD pelo mesmo motivo da vigencia: a subtracao de dias
+ * dependeria dela, e uma data 04/09/2026 daria contagem errada calada. A meta
+ * precisa ser um inteiro de 1 para cima — meta 0, negativa ou fracionada nao
+ * faz sentido para "quantas vendas faltam".
+ */
+function normalizarContagemRegressiva(edition: EventEdition): void {
+  const data = edition.dataDoEvento;
+  if (data === undefined || data === null || String(data).trim() === '') {
+    delete edition.dataDoEvento;
+  } else if (typeof data !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(data)) {
+    throw new Error(
+      `"${edition.label}": a data do evento precisa estar no formato AAAA-MM-DD (recebi "${data}")`,
+    );
+  }
+
+  // A config chega de JSON gravado pela interface, entao a meta pode vir como
+  // string ou vazia; por isso tratamos como valor solto antes de exigir numero.
+  const meta = edition.metaDeVendas as unknown;
+  if (meta === undefined || meta === null || (typeof meta === 'string' && meta.trim() === '')) {
+    delete edition.metaDeVendas;
+  } else {
+    const numero = typeof meta === 'number' ? meta : Number(meta);
+    if (!Number.isInteger(numero) || numero < 1) {
+      throw new Error(
+        `"${edition.label}": a meta de vendas precisa ser um numero inteiro de 1 para cima (recebi "${meta}")`,
+      );
+    }
+    edition.metaDeVendas = numero;
+  }
+}
+
+/**
+ * Normaliza um apelido: texto vira texto, objeto continua objeto, e um objeto
+ * cuja janela ficou vazia volta a ser texto simples — assim a configuracao
+ * salva nao acumula `{"nome":"X"}` sem proposito.
+ */
+function limparApelido(alias: unknown, rotuloDaEdicao: string): AliasConfig | null {
+  if (alias && typeof alias === 'object' && !Array.isArray(alias)) {
+    const bruto = alias as { nome?: unknown; vigencia?: Vigencia };
+    const nome = String(bruto.nome ?? '').trim();
+    if (!nome) return null;
+    const vigencia = bruto.vigencia;
+    validarVigencia(vigencia, `${rotuloDaEdicao} / apelido "${nome}"`);
+    if (!vigencia || (!vigencia.de && !vigencia.ate)) return nome;
+    return { nome, vigencia };
+  }
+  const nome = String(alias ?? '').trim();
+  return nome ? nome : null;
+}
+
+/**
+ * Aceita o formato antigo de ticketTypes, um objeto {id: [apelidos]} sem preco
+ * nem numero de cadeiras. Existiu antes de o VIP aparecer no dado real; uma
+ * configuracao ja salva pela interface ainda pode estar nesse formato.
+ */
+function migrarTiposDeIngresso(valor: unknown): TicketTypeConfig[] {
+  if (Array.isArray(valor)) return valor as TicketTypeConfig[];
+  if (!valor || typeof valor !== 'object') return [];
+
+  const CADEIRAS: Record<string, number> = { individual: 1, duplo: 2, triplo: 3 };
+  return Object.entries(valor as Record<string, string[]>).map(([id, aliases]) => {
+    const cadeiras = CADEIRAS[id] ?? (id === 'cortesia' || id === 'acompanhante' ? 0 : 1);
+    return {
+      id,
+      label: id.charAt(0).toUpperCase() + id.slice(1),
+      aliases: Array.isArray(aliases) ? aliases : [],
+      cadeiras,
+      preco: cadeiras === 0 ? 0 : null,
+      contaComoVenda: cadeiras > 0,
+    };
+  });
+}

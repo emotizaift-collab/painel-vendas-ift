@@ -1,0 +1,477 @@
+{
+  "$comentario": "Configuracao padrao do painel. A interface grava as alteracoes em data/event-config.json; este arquivo continua sendo o ponto de restauracao. Em ticketTypes, preco null significa ticketPrice x cadeiras; cadeiras 0 = a pessoa e contada por outra via (convidado de embaixador) ou ja foi contada no ingresso do comprador (acompanhante).",
+  "ticketPrice": 91.16,
+  "sources": {
+    "leads": {
+      "spreadsheetId": "1ZfYGvQU4NsKrVMSLdHrAe9UJFtyUpNaC22qBQlrScbg",
+      "tab": "INTERESSADOS EVENTOS PRESENCIAIS",
+      "headerRow": 1,
+      "columns": {
+        "date": "A",
+        "event": "auto:Evento"
+      }
+    },
+    "buyers": {
+      "spreadsheetId": "1KNrlzQwoqT1tW4O2JDeo6fn9SH0t2M2CoTWRO546Y5o",
+      "tab": "VENDAS TOTAL LOW TICKET (IFT + IFTS)",
+      "headerRow": 1,
+      "columns": {
+        "date": "auto:Data de pagamento",
+        "event": "auto:Produto",
+        "ticketType": "auto:Oferta",
+        "ambassador": "",
+        "valor": "auto:Valor Bruto"
+      }
+    },
+    "traffic": {
+      "spreadsheetId": "1e1Uf7GyBiP1pMCBJGl12PldPYQSsQtuFGqmaCIHcw48",
+      "tab": "PLAN PARA DASH",
+      "headerRow": 1,
+      "columns": {
+        "date": "A",
+        "campaign": "D",
+        "cost": "F"
+      }
+    },
+    "ambassadors": {
+      "spreadsheetId": "1KNrlzQwoqT1tW4O2JDeo6fn9SH0t2M2CoTWRO546Y5o",
+      "tab": "LISTA DE PARTICIPANTES PRESENCIAL",
+      "headerRow": 1,
+      "columns": {
+        "date": "auto:DATA DA VENDA",
+        "event": "auto:EVENTO",
+        "ambassador": "auto:EMBAIXADOR"
+      }
+    }
+  },
+  "ticketTypes": [
+    {
+      "id": "individual",
+      "label": "Individual",
+      "cadeiras": 1,
+      "preco": null,
+      "contaComoVenda": true,
+      "aliases": [
+        "individual",
+        "ingresso individual",
+        "1 pessoa",
+        "uma pessoa"
+      ]
+    },
+    {
+      "id": "duplo",
+      "label": "Duplo",
+      "cadeiras": 2,
+      "preco": null,
+      "contaComoVenda": true,
+      "aliases": [
+        "cadeira dupla",
+        "duas pessoas",
+        "ingresso duplo",
+        "duplo",
+        "dupla",
+        "2 pessoas"
+      ]
+    },
+    {
+      "id": "triplo",
+      "label": "Triplo",
+      "cadeiras": 3,
+      "preco": null,
+      "contaComoVenda": true,
+      "aliases": [
+        "ingresso triplo",
+        "tres pessoas",
+        "triplo",
+        "tripla",
+        "3 pessoas"
+      ]
+    },
+    {
+      "id": "vip",
+      "label": "VIP",
+      "cadeiras": 1,
+      "preco": 297.0,
+      "contaComoVenda": true,
+      "aliases": [
+        "vip",
+        "ingresso vip",
+        "inteira",
+        "inteiro",
+        "ingresso inteiro",
+        "vip segunda cadeira",
+        "vip 2 cadeira",
+        "segunda cadeira vip",
+        "vip individual",
+        "individual vip"
+      ]
+    },
+    {
+      "id": "vip-duplo",
+      "label": "VIP duplo",
+      "cadeiras": 2,
+      "preco": 594.0,
+      "contaComoVenda": true,
+      "aliases": [
+        "vip duplo",
+        "vip dupla",
+        "cadeira dupla vip",
+        "vip 2 pessoas",
+        "vip duas pessoas",
+        "vip 2",
+        "vip par"
+      ]
+    },
+    {
+      "id": "vip-triplo",
+      "label": "VIP triplo",
+      "cadeiras": 3,
+      "preco": 891.0,
+      "contaComoVenda": true,
+      "aliases": [
+        "vip triplo",
+        "vip tripla",
+        "vip 3 pessoas",
+        "vip tres pessoas",
+        "vip 3",
+        "vip trio"
+      ]
+    },
+    {
+      "id": "cortesia",
+      "label": "Convite embaixador",
+      "cadeiras": 0,
+      "preco": 0.0,
+      "contaComoVenda": false,
+      "aliases": [
+        "convite embaixador",
+        "embaixador",
+        "convite",
+        "cortesia"
+      ]
+    },
+    {
+      "id": "acompanhante",
+      "label": "Acompanhante (2ª pessoa do duplo)",
+      "cadeiras": 0,
+      "preco": 0.0,
+      "contaComoVenda": false,
+      "aliases": [
+        "cad",
+        "cad da",
+        "cad de",
+        "cad do",
+        "cad das",
+        "cad dos",
+        "cade",
+        "cade da",
+        "cade de",
+        "cade do",
+        "cadeira da",
+        "cadeira de",
+        "cadeira do",
+        "acompanhante",
+        "dupla de",
+        "dupla da",
+        "dupla do"
+      ]
+    }
+  ],
+  "eventLines": [
+    {
+      "id": "dai",
+      "label": "Dinâmicas de Alto Impacto",
+      "editions": [
+        {
+          "id": "dai-ed-01",
+          "label": "#01🎤 DAY TRAINING – Dinamicas de Alto Impacto com Professor Massaru Ogata",
+          "current": true,
+          "aliases": [
+            "#01🎤 DAY TRAINING – Dinamicas de Alto Impacto com Professor Massaru Ogata",
+            "DAI",
+            "Dinâmicas de Alto Impacto",
+            "Dinamicas de Alto Impacto"
+          ]
+        },
+        {
+          "id": "dai-nomes-pai",
+          "label": "Palestrante de Alto Impacto (leads e tráfego)",
+          "current": false,
+          "aliases": [
+            "PAI",
+            "PAIAOVIVO",
+            "PAI AO VIVO",
+            "PAI 147$",
+            "Palestrante de Alto Impacto",
+            "Palestrante ao Vivo"
+          ],
+          "vigencia": {
+            "de": "2026-09-04"
+          },
+          "fonteDaLinha": true
+        }
+      ]
+    },
+    {
+      "id": "anima",
+      "label": "ANIMA Day",
+      "editions": [
+        {
+          "id": "anima-ed-01",
+          "label": "#01  ÂNIMA Day Training",
+          "current": true,
+          "aliases": [
+            "#01  ÂNIMA Day Training",
+            "ANIMADAY",
+            "ANIMA Day",
+            {
+              "nome": "DAY TRAINING",
+              "vigencia": {
+                "de": "2026-09-04"
+              }
+            },
+            {
+              "nome": "Day Training",
+              "vigencia": {
+                "de": "2026-09-04"
+              }
+            },
+            {
+              "nome": "DAYTRAINING",
+              "vigencia": {
+                "de": "2026-09-04"
+              }
+            },
+            {
+              "nome": "DAY TRAININ",
+              "vigencia": {
+                "de": "2026-09-04"
+              }
+            },
+            "Day Training Sist"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "formacao-palestrantes",
+      "label": "Day Training — Formação de Palestrantes",
+      "editions": [
+        {
+          "id": "fp-ed-01",
+          "label": "🎤 DAY TRAINING – FORMAÇÃO DE PALESTRANTES com Professor Massaru",
+          "current": false,
+          "aliases": [
+            "🎤 DAY TRAINING – FORMAÇÃO DE PALESTRANTES com Professor Massaru"
+          ]
+        },
+        {
+          "id": "fp-ed-02",
+          "label": "#02 🎤 DAY TRAINING – FORMAÇÃO DE PALESTRANTES com Professor Massaru",
+          "current": false,
+          "aliases": [
+            "#02 🎤 DAY TRAINING – FORMAÇÃO DE PALESTRANTES com Professor Massaru"
+          ]
+        },
+        {
+          "id": "fp-ed-03",
+          "label": "#03 🎤 DAY TRAINING – FORMAÇÃO DE PALESTRANTES com Professor Massaru Ogata",
+          "current": false,
+          "aliases": [
+            "#03 🎤 DAY TRAINING – FORMAÇÃO DE PALESTRANTES com Professor Massaru Ogata"
+          ]
+        },
+        {
+          "id": "fp-ed-04",
+          "label": "#04 🎤 DAY TRAINING – FORMAÇÃO DE PALESTRANTES com Professor Massaru Ogata",
+          "current": false,
+          "aliases": [
+            "#04 🎤 DAY TRAINING – FORMAÇÃO DE PALESTRANTES com Professor Massaru Ogata"
+          ]
+        },
+        {
+          "id": "fp-ed-05",
+          "label": "#05 🎤 DAY TRAINING – FORMAÇÃO DE PALESTRANTES com Professor Massaru Ogata",
+          "current": true,
+          "aliases": [
+            "#05 🎤 DAY TRAINING – FORMAÇÃO DE PALESTRANTES com Professor Massaru Ogata"
+          ]
+        },
+        {
+          "id": "fp-nomes-antigos",
+          "label": "Palestrante de Alto Impacto (leads e tráfego)",
+          "current": false,
+          "aliases": [
+            "PAI",
+            "PAIAOVIVO",
+            "PAI AO VIVO",
+            "PAI 147$",
+            "Palestrante de Alto Impacto",
+            "Palestrante ao Vivo"
+          ],
+          "vigencia": {
+            "ate": "2026-09-02"
+          },
+          "fonteDaLinha": true
+        }
+      ]
+    },
+    {
+      "id": "dinamicas-sistemicas",
+      "label": "Dinâmicas Sistêmicas",
+      "editions": [
+        {
+          "id": "ds-ed-01",
+          "label": "Day Training - Dinâmicas Sistêmicas",
+          "current": false,
+          "aliases": [
+            "Day Training - Dinâmicas Sistêmicas"
+          ]
+        },
+        {
+          "id": "ds-ed-02",
+          "label": "#02 Day Training - Dinâmicas Sistêmicas",
+          "current": false,
+          "aliases": [
+            "#02 Day Training - Dinâmicas Sistêmicas"
+          ]
+        },
+        {
+          "id": "ds-ed-03",
+          "label": "#03 Day Training - Dinâmicas Sistêmicas",
+          "current": false,
+          "aliases": [
+            "#03 Day Training - Dinâmicas Sistêmicas"
+          ]
+        },
+        {
+          "id": "ds-ed-04",
+          "label": "#04 Day Training - Dinâmicas Sistêmicas",
+          "current": true,
+          "aliases": [
+            "#04 Day Training - Dinâmicas Sistêmicas"
+          ]
+        },
+        {
+          "id": "ds-nomes-antigos",
+          "label": "Dinâmicas ao Vivo (leads e tráfego)",
+          "current": false,
+          "aliases": [
+            "DINAMICASAOVIVO",
+            "Dinâmicas ao Vivo"
+          ],
+          "fonteDaLinha": true
+        }
+      ]
+    },
+    {
+      "id": "day-training-compartilhado",
+      "label": "Day Training (ANIMA + Dinâmicas, sem separação)",
+      "editions": [
+        {
+          "id": "dt-ambiguo",
+          "label": "Leads até 03/09/2026",
+          "current": false,
+          "aliases": [
+            "DAY TRAINING",
+            "Day Training",
+            "DAYTRAINING",
+            "DAY TRAININ"
+          ],
+          "vigencia": {
+            "ate": "2026-09-03"
+          }
+        }
+      ],
+      "compartilhadoCom": [
+        "anima",
+        "dinamicas-sistemicas"
+      ]
+    }
+  ],
+  "usarValorDaPlanilha": true,
+  "produtosIgnorados": [
+    "PALESTRANTE DE ALTO IMPACTO",
+    "PALESTRANTE DE ALTO IMPACTO [VITALICIO]",
+    "PALESTRANTE DE ALTO IMPACTO - 147"
+  ],
+  "campanhasIgnoradas": [
+    "DI",
+    "PAS",
+    "NP",
+    "CDM",
+    "TV",
+    "CAI",
+    "7C",
+    "MI",
+    "[IFT] [LEADS] [ABO] [F] 28-02 SP",
+    "[ANIMA] [LEADS] [CBO] - 07/07"
+  ],
+  "highTicket": {
+    "sources": {
+      "vendas": {
+        "spreadsheetId": "1KNrlzQwoqT1tW4O2JDeo6fn9SH0t2M2CoTWRO546Y5o",
+        "tab": "VENDAS TOTAL IFT",
+        "headerRow": 1,
+        "columns": {
+          "data": "auto:Data da venda",
+          "dataLead": "auto:Data do Lead",
+          "dataCall": "auto:Data da Call",
+          "cliente": "auto:Cliente",
+          "funil": "auto:Funil",
+          "sdr": "auto:SDR",
+          "mentor": "auto:MENTOR",
+          "produto": "auto:Produto",
+          "empresa": "auto:EMPRESA",
+          "formaDePagamento": "auto:Forma de Pagamento",
+          "entrada": "auto:Entrada",
+          "total": "auto:Total"
+        }
+      },
+      "leads": {
+        "spreadsheetId": "1ZfYGvQU4NsKrVMSLdHrAe9UJFtyUpNaC22qBQlrScbg",
+        "tab": "Base 1",
+        "headerRow": 1,
+        "columns": {
+          "data": "auto:Data",
+          "empresa": "auto:EMPRESA."
+        }
+      },
+      "trafego": {
+        "spreadsheetId": "1e1Uf7GyBiP1pMCBJGl12PldPYQSsQtuFGqmaCIHcw48",
+        "tab": "BASE",
+        "headerRow": 1,
+        "columns": {
+          "data": "auto:Date",
+          "campanha": "auto:Campaign Name",
+          "custo": "auto:VALOR C IMPOSTO"
+        }
+      }
+    },
+    "paineis": [
+      {
+        "id": "ift",
+        "label": "IFT",
+        "empresa": [
+          "IFT"
+        ],
+        "tagsDeCampanha": [
+          "[IFT]"
+        ]
+      },
+      {
+        "id": "sistemico",
+        "label": "Sistêmico",
+        "empresa": [
+          "IFTS",
+          "SYSTEMIC",
+          "SISTEMIC"
+        ],
+        "tagsDeCampanha": [
+          "[SISTEMIC ACADEMY]",
+          "[SYSTEMIC ACADEMY]"
+        ]
+      }
+    ]
+  }
+}

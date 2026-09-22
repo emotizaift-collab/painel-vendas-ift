@@ -1,0 +1,389 @@
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import type { AppConfig, CampanhaResumo, MetricsResponse, RespostaHighTicket } from '../../shared/types';
+import { api, conectarAoVivo, type EstadoApp } from './api';
+import { FiltroCampanhas } from './FiltroCampanhas';
+import { Painel } from './Painel';
+import { HighTicket } from './HighTicket';
+import { Configuracao } from './Configuracao';
+import { Sidebar } from './Sidebar';
+import { dataBr, diasAtras, hoje, horaBr, inicioDoMes } from './format';
+
+/** Titulo do topo por secao. Fora daqui, o menu ja e a fonte dos rotulos. */
+const TITULO_DA_SECAO: Record<string, string> = {
+  'eventos-presenciais': 'Eventos Presenciais',
+  'high-ticket': 'High Ticket',
+  configuracao: 'Configuração',
+};
+
+export function App() {
+  const [secao, setSecao] = useState('eventos-presenciais');
+  const [htDados, setHtDados] = useState<RespostaHighTicket | null>(null);
+  const [estado, setEstado] = useState<EstadoApp | null>(null);
+  const [config, setConfig] = useState<AppConfig | null>(null);
+  const [dados, setDados] = useState<MetricsResponse | null>(null);
+  const [erro, setErro] = useState<string | null>(null);
+  const [atualizando, setAtualizando] = useState(false);
+
+  // O valor do seletor e "linha:<id>" para o evento inteiro, ou "ed:<id>" para
+  // uma edicao especifica. Guardar os dois juntos evita estado inconsistente.
+  const [selecao, setSelecao] = useState('');
+  const linha = selecao.startsWith('ed:') ? '' : selecao.replace(/^linha:/, '');
+  const edicao = selecao.startsWith('ed:') ? selecao.slice(3) : '';
+
+  // A edicao separa a venda, mas nao os leads nem o custo: esses chegam com um
+  // nome generico do evento e so a data os recorta. Este atalho poupa quem
+  // escolheu uma edicao de ter de descobrir na planilha quando ela vendeu.
+  const periodoDaEdicao = edicao
+    ? (estado?.eventLines
+        .flatMap((item) => item.editions)
+        .find((item) => item.id === edicao)?.periodoDeVendas ?? null)
+    : null;
+  const [de, setDe] = useState(inicioDoMes);
+  const [ate, setAte] = useState(hoje());
+  const [campanhas, setCampanhas] = useState<CampanhaResumo[]>([]);
+  const [campanhasSel, setCampanhasSel] = useState<string[]>([]);
+  const [perfil, setPerfil] = useState('todos');
+
+  // Evita corrida entre respostas: so a busca mais recente pode escrever na tela.
+  const buscaAtual = useRef(0);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const [estadoInicial, configInicial] = await Promise.all([api.estado(), api.config()]);
+        setEstado(estadoInicial);
+        setConfig(configInicial);
+        // Abre em "Todos os eventos", nao no primeiro da lista.
+        //
+        // O primeiro da lista e so quem ficou em primeiro no arquivo de
+        // configuracao — hoje o Dinamicas de Alto Impacto, que nao tem convite
+        // de embaixador nenhum. Quem abria o painel via 0 Embaixadores,
+        // 0 Convidados, 0 Total e concluia que a funcionalidade estava
+        // quebrada, quando o numero era verdadeiro para AQUELE evento: em
+        // "Todos os eventos", o mesmo periodo mostra 11 / 16 / 27.
+        //
+        // Painel bom abre mostrando tudo e deixa a pessoa estreitar.
+        setSelecao((atual) => atual || 'linha:todos');
+      } catch (falha) {
+        setErro(falha instanceof Error ? falha.message : String(falha));
+      }
+    })();
+  }, []);
+
+  const buscarMetricas = useCallback(async () => {
+    if (!linha && !edicao) return;
+    const marca = ++buscaAtual.current;
+    try {
+      const resposta = await api.metricas({
+        // Ao escolher uma edicao, a linha vira "todos": quem manda e a edicao.
+        line: edicao ? 'todos' : linha,
+        edition: edicao || undefined,
+        profile: perfil,
+        from: de,
+        to: ate,
+        campanhas: campanhasSel,
+      });
+      if (marca !== buscaAtual.current) return;
+      setDados(resposta);
+      setErro(null);
+    } catch (falha) {
+      if (marca !== buscaAtual.current) return;
+      setErro(falha instanceof Error ? falha.message : String(falha));
+    }
+  }, [linha, edicao, perfil, de, ate, campanhasSel]);
+
+  useEffect(() => {
+    void buscarMetricas();
+  }, [buscarMetricas]);
+
+  // O High Ticket le so quando a secao esta aberta: sao tres abas grandes e nao
+  // ha por que buscar de novo enquanto ninguem esta olhando para elas.
+  useEffect(() => {
+    if (secao !== 'high-ticket') return;
+    let cancelado = false;
+    api
+      .highTicket({ from: de, to: ate })
+      .then((resposta) => {
+        if (!cancelado) setHtDados(resposta);
+      })
+      .catch((falha) => {
+        if (!cancelado) setErro(falha instanceof Error ? falha.message : String(falha));
+      });
+    return () => {
+      cancelado = true;
+    };
+  }, [secao, de, ate, estado?.versao]);
+
+  // A lista do filtro segue o periodo: campanha que nao rodou no intervalo nao
+  // precisa poluir a busca.
+  useEffect(() => {
+    let cancelado = false;
+    api
+      .campanhas({ from: de, to: ate })
+      .then((resposta) => {
+        if (!cancelado) setCampanhas(resposta.campanhas);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelado = true;
+    };
+  }, [de, ate, estado?.versao]);
+
+  // Conexao ao vivo: o servidor avisa quando a planilha muda e o painel se refaz sozinho.
+  useEffect(() => {
+    return conectarAoVivo(() => {
+      void buscarMetricas();
+      void api.estado().then(setEstado).catch(() => undefined);
+    });
+  }, [buscarMetricas]);
+
+  async function atualizarAgora() {
+    setAtualizando(true);
+    try {
+      await api.atualizarAgora();
+      await buscarMetricas();
+      setEstado(await api.estado());
+    } catch (falha) {
+      setErro(falha instanceof Error ? falha.message : String(falha));
+    } finally {
+      setAtualizando(false);
+    }
+  }
+
+  if (!estado || !config) {
+    return (
+      <div className="layout">
+        <Sidebar secaoAtiva={secao} aoEscolher={setSecao} rodape="Carregando..." />
+        <main className="conteudo">
+          <div className="carregando">{erro ? `Erro: ${erro}` : 'Carregando o painel...'}</div>
+        </main>
+      </div>
+    );
+  }
+
+  const avisos = dados?.warnings ?? [];
+  const falhas = dados?.falhas ?? estado.falhas ?? [];
+
+  const naSecao = (id: string) => secao === id;
+
+  return (
+    <div className="layout">
+      <Sidebar
+        secaoAtiva={secao}
+        aoEscolher={setSecao}
+        rodape={
+          <>
+            Última leitura
+            <br />
+            {horaBr(estado.fetchedAt)}
+          </>
+        }
+      />
+
+      <main className="conteudo">
+      <header className="pagina-topo">
+        <h1>{TITULO_DA_SECAO[secao] ?? 'Eventos Presenciais'}</h1>
+        <p>
+          {naSecao('configuracao')
+            ? 'Nomes dos eventos, tipos de ingresso e de onde os dados são lidos.'
+            : naSecao('high-ticket')
+              ? 'IFT e Sistêmico lado a lado, no período selecionado.'
+              : `Ingresso individual: ${estado.ticketPrice.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}`}
+        </p>
+      </header>
+
+      {estado.demo && (
+        <div className="aviso alerta">
+          <strong>Fontes parciais.</strong> A chave de acesso do Google ainda não foi configurada:
+          leads, tráfego e conciliação da planilha estão em modo demonstração.
+          {estado.greennSales > 0 && (
+            <> As <strong>{estado.greennSales} vendas Greenn</strong> exibidas são oficiais e foram
+              {estado.greennLocal ? ' carregadas do arquivo local.' : ' atualizadas pela API.'}</>
+          )}
+          {estado.greennSales === 0 && <> Configure a chave do Google e a Greenn para analisar os dados reais.</>}
+        </div>
+      )}
+
+      {erro && <div className="aviso erro"><strong>Erro:</strong> {erro}</div>}
+      {estado.erro && !estado.demo && (
+        <div className="aviso erro"><strong>Falha ao ler as planilhas:</strong> {estado.erro}</div>
+      )}
+
+      {falhas.length > 0 && (
+        <div className="aviso erro">
+          <strong>O painel não conseguiu ler as planilhas, então os números abaixo estão zerados.</strong>
+          <ul>
+            {falhas.map((falha) => (
+              <li key={falha}>{falha}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {avisos.length > 0 && !estado.demo && (
+        <div className="aviso alerta">
+          <strong>Pontos de atenção:</strong>
+          <ul>
+            {avisos.map((aviso) => (
+              <li key={aviso}>{aviso}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {naSecao('eventos-presenciais') && (
+        <>
+          <div className="filtros">
+            <div className="campo">
+              <label htmlFor="perfil">Perfil Greenn</label>
+              <select id="perfil" value={perfil} onChange={(e) => setPerfil(e.target.value)}>
+                <option value="todos">Todos os perfis</option>
+                {estado.greennProfiles.map((item) => (
+                  <option key={item.id} value={item.id}>{item.label}</option>
+                ))}
+              </select>
+            </div>
+            <div className="campo">
+              <label htmlFor="linha">Nome do Evento</label>
+              <select id="linha" value={selecao} onChange={(e) => setSelecao(e.target.value)}>
+                <option value="linha:todos">Todos os eventos</option>
+                {estado.eventLines.map((item) => (
+                  <optgroup key={item.id} label={item.label}>
+                    <option value={`linha:${item.id}`}>{item.label} — todas as edições</option>
+                    {item.editions.map((ed) => (
+                      // Sem recuo manual: o rotulo e o nome do produto como ele
+                      // esta na planilha, e nada pode ser acrescentado a ele.
+                      <option key={ed.id} value={`ed:${ed.id}`}>
+                        {ed.label}
+                      </option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
+            </div>
+
+            <div className="campo">
+              <label htmlFor="de">Data inicial</label>
+              <input id="de" type="date" value={de} max={ate} onChange={(e) => setDe(e.target.value)} />
+            </div>
+
+            <div className="campo">
+              <label htmlFor="ate">Data final</label>
+              <input id="ate" type="date" value={ate} min={de} onChange={(e) => setAte(e.target.value)} />
+            </div>
+
+            <div className="campo" style={{ minWidth: 260 }}>
+              <label>Campanha</label>
+              <FiltroCampanhas
+                campanhas={campanhas}
+                selecionadas={campanhasSel}
+                aoMudar={setCampanhasSel}
+              />
+            </div>
+
+            <div className="campo">
+              <label>Atalhos</label>
+              <div className="atalhos">
+                <button onClick={() => { setDe(hoje()); setAte(hoje()); }}>Hoje</button>
+                <button onClick={() => { setDe(diasAtras(6)); setAte(hoje()); }}>7 dias</button>
+                <button onClick={() => { setDe(diasAtras(29)); setAte(hoje()); }}>30 dias</button>
+                <button onClick={() => { setDe(inicioDoMes()); setAte(hoje()); }}>Este mês</button>
+                <button onClick={() => { setDe('2024-01-01'); setAte(hoje()); }}>Tudo</button>
+                {periodoDaEdicao && (
+                  <button
+                    title={`De ${dataBr(periodoDaEdicao.de)} a ${dataBr(periodoDaEdicao.ate)}, quando esta edição vendeu`}
+                    onClick={() => { setDe(periodoDaEdicao.de); setAte(periodoDaEdicao.ate); }}
+                  >
+                    Período desta edição
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="campo">
+              <label>&nbsp;</label>
+              <button className="botao" onClick={atualizarAgora} disabled={atualizando}>
+                {atualizando ? 'Atualizando...' : 'Atualizar agora'}
+              </button>
+            </div>
+          </div>
+
+          {campanhasSel.length > 0 && (
+            <div className="aviso info">
+              <strong>Filtrando por {campanhasSel.length} campanha(s).</strong> O{' '}
+              <strong>custo</strong> é exato: vem das linhas dessas campanhas na planilha de tráfego. Já o{' '}
+              <strong>faturamento</strong> não pode ser separado por campanha, porque a aba de compradores
+              não registra de qual campanha veio cada venda — então ele mostra o faturamento{' '}
+              <strong>dos eventos</strong> a que essas campanhas pertencem, no mesmo período.
+            </div>
+          )}
+
+          {dados ? (
+            <Painel dados={dados} />
+          ) : (
+            <div className="carregando">Calculando as métricas...</div>
+          )}
+
+          <p className="rodape">
+            Período selecionado: {dataBr(de)} até {dataBr(ate)}.<br />
+            O painel se atualiza sozinho assim que uma planilha é editada — não precisa recarregar a página.
+          </p>
+        </>
+      )}
+
+      {naSecao('high-ticket') && (
+        <>
+          <div className="filtros">
+            <div className="campo">
+              <label htmlFor="ht-de">Data inicial</label>
+              <input id="ht-de" type="date" value={de} max={ate} onChange={(e) => setDe(e.target.value)} />
+            </div>
+            <div className="campo">
+              <label htmlFor="ht-ate">Data final</label>
+              <input id="ht-ate" type="date" value={ate} min={de} onChange={(e) => setAte(e.target.value)} />
+            </div>
+            <div className="campo">
+              <label>Atalhos</label>
+              <div className="atalhos">
+                <button onClick={() => { setDe(hoje()); setAte(hoje()); }}>Hoje</button>
+                <button onClick={() => { setDe(diasAtras(6)); setAte(hoje()); }}>7 dias</button>
+                <button onClick={() => { setDe(diasAtras(29)); setAte(hoje()); }}>30 dias</button>
+                <button onClick={() => { setDe(inicioDoMes()); setAte(hoje()); }}>Este mês</button>
+                <button onClick={() => { setDe('2024-01-01'); setAte(hoje()); }}>Tudo</button>
+              </div>
+            </div>
+            <div className="campo">
+              <label>&nbsp;</label>
+              <button className="botao" onClick={atualizarAgora} disabled={atualizando}>
+                {atualizando ? 'Atualizando...' : 'Atualizar agora'}
+              </button>
+            </div>
+          </div>
+
+          {htDados ? (
+            <HighTicket dados={htDados} />
+          ) : (
+            <div className="carregando">Lendo as planilhas do High Ticket...</div>
+          )}
+
+          <p className="rodape">
+            Período selecionado: {dataBr(de)} até {dataBr(ate)}.
+          </p>
+        </>
+      )}
+
+      {naSecao('configuracao') && (
+        <Configuracao
+          config={config}
+          naoClassificado={dados?.metrics.naoClassificado ?? null}
+          aoSalvar={(novo) => {
+            setConfig(novo);
+            void api.estado().then(setEstado).catch(() => undefined);
+            void buscarMetricas();
+          }}
+        />
+      )}
+      </main>
+    </div>
+  );
+}

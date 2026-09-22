@@ -1,0 +1,689 @@
+From e1a7ceba0566c1553665c2aef0ecf6d6b5b35415 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 17 Sep 2026 15:28:53 -0300
+Subject: [PATCH] Detalha tipos de ingresso por pessoa e adiciona contagens
+ regressivas
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Parte 1 — Tipos de ingresso: o painel ja separava cada tipo e ja excluia
+o convite gratuito do faturamento (contaComoVenda=false). Faltava deixar
+explicito na tela o numero de PESSOAS por tipo, que e onde o duplo x2 e o
+triplo x3 se perdiam num so numero de vendas. Agora cada tipo pago mostra
+vendas, pessoas (quando difere) e faturamento; o convite de embaixador
+continua em bloco proprio, marcado como gratuito e "cada um = 1 pessoa".
+Nenhum calculo mudou: Total de Participantes e faturamento seguem iguais.
+
+Parte 2 — Contagens regressivas por edicao:
+- EventEdition ganha dataDoEvento (AAAA-MM-DD) e metaDeVendas (inteiro >= 1),
+  cadastrados a mao na tela de Configuracao. validateConfig recusa data em
+  formato errado e meta 0/negativa/fracionada, e some com campo vazio — mesmo
+  cuidado ja usado na vigencia.
+- Metrics.contagemRegressiva traz dias ate o evento (data - hoje, fuso de Sao
+  Paulo) e vendas restantes (meta - vendas pagas). vendasRealizadas e
+  CUMULATIVA (todas as vendas pagas da edicao ate hoje, sem recorte de data
+  nem de campanha), porque a meta e cumulativa; so os dias dependem de hoje.
+- A "edicao em foco" e a escolhida no seletor ou, numa linha inteira, a
+  edicao atual (current). Em "todos os eventos" nao ha contagem.
+- O painel mostra so o numero e a frase, sem grafico, como pedido. Cada
+  metade aparece so quando aquele dado esta cadastrado.
+
+Escopo: so na secao Eventos Presenciais. High Ticket e a contagem de
+embaixadores unicos nao foram tocados. 14 testes novos (142 no total).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Rv7XEKLeyGNW3pNu8chXkC
+---
+ server/src/config.ts        | 39 ++++++++++++++++-
+ server/src/metrics.ts       | 77 +++++++++++++++++++++++++++++++++-
+ server/test/config.test.js  | 39 +++++++++++++++++
+ server/test/metrics.test.js | 78 ++++++++++++++++++++++++++++++++++
+ shared/types.ts             | 54 ++++++++++++++++++++++++
+ web/src/Configuracao.tsx    | 57 ++++++++++++++++++++++++-
+ web/src/Painel.tsx          | 83 ++++++++++++++++++++++++++++++++++---
+ web/src/styles.css          | 18 ++++++++
+ 8 files changed, 437 insertions(+), 8 deletions(-)
+
+diff --git a/server/src/config.ts b/server/src/config.ts
+index c37d4b8..17790dd 100644
+--- a/server/src/config.ts
++++ b/server/src/config.ts
+@@ -7,7 +7,7 @@
+ import fs from 'node:fs';
+ import path from 'node:path';
+ import { fileURLToPath } from 'node:url';
+-import type { AliasConfig, AppConfig, TicketTypeConfig, Vigencia } from '../../shared/types.js';
++import type { AliasConfig, AppConfig, EventEdition, TicketTypeConfig, Vigencia } from '../../shared/types.js';
+ import { nomeDoApelido } from '../../shared/types.js';
+ 
+ /**
+@@ -93,6 +93,7 @@ export function validateConfig(config: AppConfig): AppConfig {
+       edition.current = Boolean(edition.current);
+       validarVigencia(edition.vigencia, edition.label);
+       if (edition.vigencia && !edition.vigencia.de && !edition.vigencia.ate) delete edition.vigencia;
++      normalizarContagemRegressiva(edition);
+     }
+   }
+ 
+@@ -157,6 +158,42 @@ function validarVigencia(vigencia: Vigencia | undefined, rotulo: string): void {
+   }
+ }
+ 
++/**
++ * Valida (e limpa) a data do evento e a meta de vendas de uma edicao — os dois
++ * campos que alimentam a contagem regressiva.
++ *
++ * Campo vazio some, em vez de virar "" ou NaN salvo na configuracao. A data
++ * exige AAAA-MM-DD pelo mesmo motivo da vigencia: a subtracao de dias
++ * dependeria dela, e uma data 04/09/2026 daria contagem errada calada. A meta
++ * precisa ser um inteiro de 1 para cima — meta 0, negativa ou fracionada nao
++ * faz sentido para "quantas vendas faltam".
++ */
++function normalizarContagemRegressiva(edition: EventEdition): void {
++  const data = edition.dataDoEvento;
++  if (data === undefined || data === null || String(data).trim() === '') {
++    delete edition.dataDoEvento;
++  } else if (typeof data !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(data)) {
++    throw new Error(
++      `"${edition.label}": a data do evento precisa estar no formato AAAA-MM-DD (recebi "${data}")`,
++    );
++  }
++
++  // A config chega de JSON gravado pela interface, entao a meta pode vir como
++  // string ou vazia; por isso tratamos como valor solto antes de exigir numero.
++  const meta = edition.metaDeVendas as unknown;
++  if (meta === undefined || meta === null || (typeof meta === 'string' && meta.trim() === '')) {
++    delete edition.metaDeVendas;
++  } else {
++    const numero = typeof meta === 'number' ? meta : Number(meta);
++    if (!Number.isInteger(numero) || numero < 1) {
++      throw new Error(
++        `"${edition.label}": a meta de vendas precisa ser um numero inteiro de 1 para cima (recebi "${meta}")`,
++      );
++    }
++    edition.metaDeVendas = numero;
++  }
++}
++
+ /**
+  * Normaliza um apelido: texto vira texto, objeto continua objeto, e um objeto
+  * cuja janela ficou vazia volta a ser texto simples — assim a configuracao
+diff --git a/server/src/metrics.ts b/server/src/metrics.ts
+index d57c766..9311a62 100644
+--- a/server/src/metrics.ts
++++ b/server/src/metrics.ts
+@@ -8,11 +8,84 @@
+  *  - Participantes = 1x individual + 2x duplo + 3x triplo + embaixadores + convidados
+  */
+ import type {
+-  AppConfig, DataSet, DailyPoint, Metrics, ValorNaoClassificado,
++  AppConfig, ContagemRegressiva, DataSet, DailyPoint, EventEdition, Metrics, ValorNaoClassificado,
+ } from '../../shared/types.js';
+ import { precoDoTipo } from '../../shared/types.js';
+ import { chaveDoEmbaixador } from './normalize.js';
+ 
++/** A data de hoje no fuso de São Paulo, em AAAA-MM-DD. */
++export function hojeSaoPaulo(): string {
++  const local = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
++  return /^\d{4}-\d{2}-\d{2}$/.test(local) ? local : new Date().toISOString().slice(0, 10);
++}
++
++/** Dias de `hoje` ate `alvo` (positivo = futuro). Ambos em AAAA-MM-DD. */
++function diffEmDias(alvo: string, hoje: string): number {
++  const a = Date.parse(`${alvo}T00:00:00Z`);
++  const b = Date.parse(`${hoje}T00:00:00Z`);
++  if (Number.isNaN(a) || Number.isNaN(b)) return 0;
++  return Math.round((a - b) / 86_400_000);
++}
++
++/**
++ * A edicao "em foco" para a contagem regressiva: a edicao escolhida no seletor
++ * ou, quando o filtro esta numa linha inteira, a edicao atual (current) dela.
++ * Em "todos os eventos" nao ha edicao unica, entao devolve null.
++ */
++function edicaoEmFoco(config: AppConfig, filter: MetricsFilter): EventEdition | null {
++  if (filter.editionId) {
++    for (const linha of config.eventLines) {
++      const achada = linha.editions.find((edicao) => edicao.id === filter.editionId);
++      if (achada) return achada;
++    }
++    return null;
++  }
++  if (filter.lineId && filter.lineId !== 'todos') {
++    const linha = config.eventLines.find((item) => item.id === filter.lineId);
++    return linha?.editions.find((edicao) => edicao.current) ?? null;
++  }
++  return null;
++}
++
++/**
++ * Monta a contagem regressiva da edicao em foco, ou null quando nao ha edicao
++ * unica ou ela nao tem data nem meta cadastrada.
++ *
++ * vendasRealizadas conta TODAS as vendas pagas da edicao ate hoje — sem recorte
++ * de data nem de campanha —, porque a meta e cumulativa. So diasParaEvento
++ * depende de `hoje`.
++ */
++function calcularContagemRegressiva(
++  config: AppConfig,
++  data: DataSet,
++  filter: MetricsFilter,
++  hoje: string,
++): ContagemRegressiva | null {
++  const edicao = edicaoEmFoco(config, filter);
++  if (!edicao) return null;
++  const temData = typeof edicao.dataDoEvento === 'string' && edicao.dataDoEvento !== '';
++  const temMeta = typeof edicao.metaDeVendas === 'number';
++  if (!temData && !temMeta) return null;
++
++  const tiposPagos = new Set(
++    config.ticketTypes.filter((tipo) => tipo.contaComoVenda).map((tipo) => tipo.id),
++  );
++  const vendasRealizadas = data.buyers.filter(
++    (row) => row.editionId === edicao.id && row.ticketKind !== null && tiposPagos.has(row.ticketKind),
++  ).length;
++
++  const dataDoEvento = temData ? (edicao.dataDoEvento as string) : null;
++  const metaDeVendas = temMeta ? (edicao.metaDeVendas as number) : null;
++  return {
++    rotulo: edicao.label,
++    dataDoEvento,
++    diasParaEvento: dataDoEvento ? diffEmDias(dataDoEvento, hoje) : null,
++    metaDeVendas,
++    vendasRealizadas,
++    vendasRestantes: metaDeVendas === null ? null : metaDeVendas - vendasRealizadas,
++  };
++}
++
+ /** Tipos que representam a 2a/3a pessoa de um ingresso ja pago. */
+ function ehAcompanhante(id: string): boolean {
+   return id.includes('acompanhante');
+@@ -89,6 +162,7 @@ export function computeMetrics(
+   config: AppConfig,
+   data: DataSet,
+   filter: MetricsFilter,
++  hoje: string = hojeSaoPaulo(),
+ ): { metrics: Metrics; warnings: string[] } {
+   const warnings: string[] = [];
+   const price = config.ticketPrice;
+@@ -341,6 +415,7 @@ export function computeMetrics(
+       fonteCompartilhada,
+       participantes,
+       custoPorLead,
++      contagemRegressiva: calcularContagemRegressiva(config, data, filter, hoje),
+       ingressos,
+       embaixador: {
+         embaixadores,
+diff --git a/server/test/config.test.js b/server/test/config.test.js
+index 97eeeae..e5b3982 100644
+--- a/server/test/config.test.js
++++ b/server/test/config.test.js
+@@ -120,3 +120,42 @@ test('a lista de campanhas ignoradas sobrevive a validacao', () => {
+     assert.ok(!dosEventos.has(entrada.toUpperCase()), `"${entrada}" e apelido de evento`);
+   }
+ });
++
++/* ---------- Data do evento e meta de vendas (contagem regressiva) ---------- */
++
++const comContagem = (campos) => {
++  const config = base();
++  Object.assign(config.eventLines[0].editions[0], campos);
++  return config;
++};
++
++test('data do evento em AAAA-MM-DD passa; formato brasileiro e recusado', () => {
++  assert.doesNotThrow(() => validateConfig(comContagem({ dataDoEvento: '2026-12-25' })));
++  assert.throws(() => validateConfig(comContagem({ dataDoEvento: '25/12/2026' })), /AAAA-MM-DD/);
++});
++
++test('data do evento vazia some, em vez de virar "" salvo', () => {
++  const salvo = validateConfig(comContagem({ dataDoEvento: '' }));
++  assert.equal('dataDoEvento' in salvo.eventLines[0].editions[0], false);
++});
++
++test('meta de vendas inteira e positiva passa', () => {
++  const salvo = validateConfig(comContagem({ metaDeVendas: 150 }));
++  assert.equal(salvo.eventLines[0].editions[0].metaDeVendas, 150);
++});
++
++test('meta de vendas zero, negativa ou fracionada e recusada', () => {
++  assert.throws(() => validateConfig(comContagem({ metaDeVendas: 0 })), /inteiro de 1/);
++  assert.throws(() => validateConfig(comContagem({ metaDeVendas: -5 })), /inteiro de 1/);
++  assert.throws(() => validateConfig(comContagem({ metaDeVendas: 3.5 })), /inteiro de 1/);
++});
++
++test('meta de vendas vazia some, em vez de virar NaN', () => {
++  const salvo = validateConfig(comContagem({ metaDeVendas: '' }));
++  assert.equal('metaDeVendas' in salvo.eventLines[0].editions[0], false);
++});
++
++test('meta de vendas como texto numerico e aceita e normalizada para numero', () => {
++  const salvo = validateConfig(comContagem({ metaDeVendas: '200' }));
++  assert.equal(salvo.eventLines[0].editions[0].metaDeVendas, 200);
++});
+diff --git a/server/test/metrics.test.js b/server/test/metrics.test.js
+index d6804e1..0eaadd4 100644
+--- a/server/test/metrics.test.js
++++ b/server/test/metrics.test.js
+@@ -877,3 +877,81 @@ test('zero por falta de convite no evento inteiro nao promete nada em outras dat
+   assert.equal(m.embaixador.total, 0);
+   assert.equal(m.embaixador.noHistorico, 0);
+ });
++
++/* ============================================================
++ * Contagem regressiva (dias para o evento e vendas para a meta)
++ * ============================================================ */
++
++/** Clona a config padrao e cadastra data/meta na edicao #01 do DAI (dai-ed-01). */
++function comContagem(dataDoEvento, metaDeVendas) {
++  const c = JSON.parse(JSON.stringify(config));
++  const ed = c.eventLines[0].editions[0];
++  if (dataDoEvento !== undefined) ed.dataDoEvento = dataDoEvento;
++  if (metaDeVendas !== undefined) ed.metaDeVendas = metaDeVendas;
++  return c;
++}
++
++const filtroEdicao = { lineId: 'todos', editionId: 'dai-ed-01', from: '2026-09-01', to: '2026-09-03', campanhas: [] };
++
++test('contagem regressiva: dias ate o evento e vendas para a meta', () => {
++  const { metrics } = computeMetrics(comContagem('2026-12-25', 100), dataset, filtroEdicao, '2026-12-01');
++  const c = metrics.contagemRegressiva;
++  assert.ok(c, 'a contagem existe quando a edicao tem data/meta');
++  assert.equal(c.dataDoEvento, '2026-12-25');
++  assert.equal(c.diasParaEvento, 24);
++  assert.equal(c.metaDeVendas, 100);
++  // 3 individuais + 1 duplo + 1 triplo = 5 vendas pagas; as 3 cortesias nao contam.
++  assert.equal(c.vendasRealizadas, 5);
++  assert.equal(c.vendasRestantes, 95);
++});
++
++test('vendas realizadas sao acumuladas, independentes do filtro de data', () => {
++  // O periodo do filtro e 01-03/09, mas ha uma venda em 01/08 fora dele.
++  // A meta e cumulativa, entao essa venda tambem conta.
++  const curto = { ...filtroEdicao, from: '2026-09-02', to: '2026-09-02' };
++  const { metrics } = computeMetrics(comContagem('2026-12-25', 100), dataset, curto, '2026-12-01');
++  assert.equal(metrics.contagemRegressiva.vendasRealizadas, 5);
++});
++
++test('sem data nem meta cadastrada, nao ha contagem regressiva', () => {
++  const { metrics } = computeMetrics(config, dataset, filtroEdicao, '2026-12-01');
++  assert.equal(metrics.contagemRegressiva, null);
++});
++
++test('em "todos os eventos" nao ha edicao unica, entao nao ha contagem', () => {
++  const filtroTodos = { lineId: 'todos', editionId: null, from: '2026-09-01', to: '2026-09-03', campanhas: [] };
++  const { metrics } = computeMetrics(comContagem('2026-12-25', 100), dataset, filtroTodos, '2026-12-01');
++  assert.equal(metrics.contagemRegressiva, null);
++});
++
++test('na linha inteira, a contagem usa a edicao atual (current)', () => {
++  const filtroLinha = { lineId: 'dai', editionId: null, from: '2026-09-01', to: '2026-09-03', campanhas: [] };
++  const { metrics } = computeMetrics(comContagem('2026-12-25', 100), dataset, filtroLinha, '2026-12-01');
++  assert.ok(metrics.contagemRegressiva);
++  assert.equal(metrics.contagemRegressiva.rotulo, config.eventLines[0].editions[0].label);
++  assert.equal(metrics.contagemRegressiva.vendasRealizadas, 5);
++});
++
++test('so a data (sem meta): mostra dias e deixa a meta nula', () => {
++  const { metrics } = computeMetrics(comContagem('2026-12-25', undefined), dataset, filtroEdicao, '2026-12-24');
++  const c = metrics.contagemRegressiva;
++  assert.equal(c.diasParaEvento, 1);
++  assert.equal(c.metaDeVendas, null);
++  assert.equal(c.vendasRestantes, null);
++});
++
++test('so a meta (sem data): mostra vendas restantes e deixa os dias nulos', () => {
++  const { metrics } = computeMetrics(comContagem(undefined, 8), dataset, filtroEdicao, '2026-12-01');
++  const c = metrics.contagemRegressiva;
++  assert.equal(c.diasParaEvento, null);
++  assert.equal(c.dataDoEvento, null);
++  assert.equal(c.vendasRestantes, 3);
++});
++
++test('evento no passado da dias negativos; meta ja batida da restante <= 0', () => {
++  const { metrics } = computeMetrics(comContagem('2026-01-01', 3), dataset, filtroEdicao, '2026-01-11');
++  const c = metrics.contagemRegressiva;
++  assert.equal(c.diasParaEvento, -10);
++  // 5 vendas contra meta 3 -> -2 (meta batida)
++  assert.equal(c.vendasRestantes, -2);
++});
+diff --git a/shared/types.ts b/shared/types.ts
+index edd0760..23c4b99 100644
+--- a/shared/types.ts
++++ b/shared/types.ts
+@@ -132,6 +132,25 @@ export interface EventEdition {
+    * aqui, sem mexer em codigo.
+    */
+   fonteDaLinha?: boolean;
++  /**
++   * Data em que o evento efetivamente acontece, em AAAA-MM-DD. Cadastrada a
++   * mao na tela de Configuracao. Alimenta a contagem regressiva de dias
++   * (ver Metrics.contagemRegressiva). Ausente = o painel nao mostra a
++   * contagem de dias para esta edicao.
++   *
++   * Formato AAAA-MM-DD pelo mesmo motivo da vigencia: a comparacao e textual
++   * e uma data escrita 04/09/2026 daria conta errada de dias, calada.
++   */
++  dataDoEvento?: string;
++  /**
++   * Meta de vendas (numero de ingressos pagos que se pretende atingir ate a
++   * data do evento). Cadastrada a mao na tela de Configuracao. Alimenta a
++   * contagem regressiva de vendas restantes. Ausente = sem contagem de meta.
++   *
++   * "Venda" aqui e uma linha de compra de tipo pago (contaComoVenda). O
++   * convite de embaixador, gratuito, nunca entra nessa conta.
++   */
++  metaDeVendas?: number;
+ }
+ 
+ export interface EventLine {
+@@ -276,6 +295,36 @@ export interface DailyPoint {
+   custo: number;
+ }
+ 
++/**
++ * Contagem regressiva de uma edicao: dias que faltam para o evento e vendas
++ * que faltam para a meta. Preenchida so quando a edicao em foco tem data ou
++ * meta cadastrada na Configuracao; caso contrario o painel nao mostra o bloco.
++ *
++ * A edicao "em foco" e a que o filtro aponta: a edicao escolhida no seletor,
++ * ou — quando o filtro esta numa linha inteira ou em "todos" — a edicao atual
++ * (current) daquela linha. Data e meta sao propriedades da edicao, entao a
++ * contagem so aparece quando o painel esta olhando para uma edicao especifica.
++ *
++ * vendasRealizadas conta TODAS as vendas pagas da edicao ate hoje, sem recorte
++ * de data nem de campanha: uma meta e cumulativa, entao filtrar "ultimos 7
++ * dias" nao pode encolher o total ja vendido. So o dia de hoje entra no
++ * calculo de diasParaEvento.
++ */
++export interface ContagemRegressiva {
++  /** Rotulo da edicao em foco, para a tela dizer de qual evento se trata. */
++  rotulo: string;
++  /** Data do evento (AAAA-MM-DD), ou null quando nao cadastrada. */
++  dataDoEvento: string | null;
++  /** Dias de hoje ate a data do evento. Positivo = futuro; 0 = hoje; negativo = passado. Null quando nao ha data. */
++  diasParaEvento: number | null;
++  /** Meta de vendas cadastrada, ou null. */
++  metaDeVendas: number | null;
++  /** Vendas pagas ja realizadas para a edicao, acumuladas ate hoje. */
++  vendasRealizadas: number;
++  /** Meta menos realizadas. Pode ser <= 0 (meta batida). Null quando nao ha meta. */
++  vendasRestantes: number | null;
++}
++
+ /** Um valor nao reconhecido e o tamanho do que ele representa. */
+ export interface ValorNaoClassificado {
+   valor: string;
+@@ -317,6 +366,11 @@ export interface Metrics {
+   fonteCompartilhada: { rotulo: string; leads: number; custo: number } | null;
+   participantes: number;
+   custoPorLead: number | null;
++  /**
++   * Contagem regressiva da edicao em foco (dias para o evento, vendas para a
++   * meta), ou null quando o filtro nao aponta uma edicao com data/meta.
++   */
++  contagemRegressiva: ContagemRegressiva | null;
+   /** Um bloco por tipo de ingresso que conta como venda, na ordem da configuracao. */
+   ingressos: Array<{
+     id: string;
+diff --git a/web/src/Configuracao.tsx b/web/src/Configuracao.tsx
+index eae081f..82bf4df 100644
+--- a/web/src/Configuracao.tsx
++++ b/web/src/Configuracao.tsx
+@@ -1,5 +1,5 @@
+ import React, { useState } from 'react';
+-import type { AliasConfig, AppConfig, Metrics, ValorNaoClassificado, Vigencia } from '../../shared/types';
++import type { AliasConfig, AppConfig, EventEdition, Metrics, ValorNaoClassificado, Vigencia } from '../../shared/types';
+ import { nomeDoApelido, vigenciaDoApelido } from '../../shared/types';
+ import { api } from './api';
+ 
+@@ -28,6 +28,19 @@ export function Configuracao({ config, naoClassificado, aoSalvar }: Props) {
+     setRascunho(copia);
+   }
+ 
++  /** Aplica uma mudança à edição de dado id, achando-a em qualquer linha. */
++  function atualizarEdicao(edicaoId: string, mudanca: (edicao: EventEdition) => void) {
++    atualizar((draft) => {
++      for (const linha of draft.eventLines) {
++        const edicao = linha.editions.find((item) => item.id === edicaoId);
++        if (edicao) {
++          mudanca(edicao);
++          return;
++        }
++      }
++    });
++  }
++
+   function adicionarApelido(edicaoId: string, apelido: string) {
+     const limpo = apelido.trim();
+     if (!limpo) return;
+@@ -111,6 +124,12 @@ export function Configuracao({ config, naoClassificado, aoSalvar }: Props) {
+           Vale tanto para a sigla usada no tráfego pago (ex.: <code className="mono">DAI</code>) quanto para
+           o nome por extenso usado nas planilhas de leads e de compradores.
+         </p>
++        <p className="explica">
++          Em cada edição você também pode preencher a <strong>data do evento</strong> e a{' '}
++          <strong>meta de vendas</strong>. Com elas, o painel de Eventos Presenciais mostra, para a edição
++          escolhida, quantos dias faltam para o evento e quantas vendas ainda faltam para bater a meta.
++          Deixe em branco para não mostrar a contagem.
++        </p>
+ 
+         {rascunho.eventLines.map((linha) => (
+           <div className="linha-evento" key={linha.id}>
+@@ -124,6 +143,42 @@ export function Configuracao({ config, naoClassificado, aoSalvar }: Props) {
+                   {ed.current && <span className="tag-atual">Nome atual</span>}
+                 </div>
+                 {ed.vigencia && <p className="edicao-vigencia">{explicarVigencia(ed.vigencia)}</p>}
++
++                <div className="filtros" style={{ margin: '0 0 12px', background: 'transparent', border: 0, padding: 0 }}>
++                  <div className="campo">
++                    <label>Data do evento</label>
++                    <input
++                      type="date"
++                      value={ed.dataDoEvento ?? ''}
++                      onChange={(e) =>
++                        atualizarEdicao(ed.id, (edicao) => {
++                          const v = e.target.value.trim();
++                          if (v) edicao.dataDoEvento = v;
++                          else delete edicao.dataDoEvento;
++                        })
++                      }
++                    />
++                  </div>
++                  <div className="campo">
++                    <label>Meta de vendas</label>
++                    <input
++                      type="number"
++                      min="1"
++                      step="1"
++                      placeholder="sem meta"
++                      value={ed.metaDeVendas ?? ''}
++                      onChange={(e) =>
++                        atualizarEdicao(ed.id, (edicao) => {
++                          const v = e.target.value.trim();
++                          if (v === '') delete edicao.metaDeVendas;
++                          else edicao.metaDeVendas = Math.max(1, Math.trunc(Number(v) || 0));
++                        })
++                      }
++                      style={{ minWidth: 130 }}
++                    />
++                  </div>
++                </div>
++
+                 <div className="apelidos">
+                   {ed.aliases.map((apelido) => (
+                     <Apelido
+diff --git a/web/src/Painel.tsx b/web/src/Painel.tsx
+index f001d5e..c311963 100644
+--- a/web/src/Painel.tsx
++++ b/web/src/Painel.tsx
+@@ -52,6 +52,8 @@ export function Painel({ dados }: Props) {
+         </div>
+       </section>
+ 
++      {m.contagemRegressiva && <Contagem c={m.contagemRegressiva} />}
++
+       <section className="metricas">
+         <Metrica rotulo="Faturamento líquido" valor={dinheiro(m.faturamentoLiquido)} />
+         <Metrica
+@@ -81,13 +83,21 @@ export function Painel({ dados }: Props) {
+       <div className="grade-detalhe">
+         <section className="secao">
+           <h2 className="secao-titulo">Tipos de ingresso</h2>
+-          <p className="secao-sub">Quantidade vendida e o quanto cada tipo faturou.</p>
++          <p className="secao-sub">
++            Cada tipo separado: quantas vendas, quantas pessoas (o duplo leva 2, o triplo 3) e o quanto
++            faturou. Só ingressos pagos entram no faturamento.
++          </p>
+           <div className="linhas">
+             {m.ingressos.map((tipo) => (
+               <Item
+                 key={tipo.id}
+                 n={tipo.quantidade}
+                 t={tipo.label}
++                sub={
++                  tipo.participantes !== tipo.quantidade
++                    ? `${numero(tipo.participantes)} pessoas`
++                    : undefined
++                }
+                 extra={tipo.quantidade > 0 ? dinheiro(tipo.faturamento) : undefined}
+               />
+             ))}
+@@ -96,10 +106,13 @@ export function Painel({ dados }: Props) {
+ 
+         <section className="secao">
+           <h2 className="secao-titulo">Embaixadores</h2>
+-          <p className="secao-sub">Convites gratuitos — não entram no faturamento.</p>
++          <p className="secao-sub">
++            Convite de embaixador é entrada gratuita: cada convidado conta como 1 pessoa nos Participantes,
++            mas não entra no faturamento.
++          </p>
+           <div className="linhas">
+             <Item n={m.embaixador.embaixadores} t="Embaixadores" />
+-            <Item n={m.embaixador.convidados} t="Convidados" />
++            <Item n={m.embaixador.convidados} t="Convidados" sub="cada um = 1 pessoa" />
+             <Item n={m.embaixador.total} t="Total" />
+           </div>
+           {notaDosConvites(m) && <p className="secao-nota">{notaDosConvites(m)}</p>}
+@@ -228,12 +241,72 @@ function Metrica({ rotulo, valor, nota }: { rotulo: string; valor: string; nota?
+   );
+ }
+ 
+-function Item({ n, t, extra }: { n: number; t: string; extra?: string }) {
++function Item({ n, t, extra, sub }: { n: number; t: string; extra?: string; sub?: string }) {
+   return (
+     <div className="linha-item">
+       <div className="bloco-valor num">{numero(n)}</div>
+-      <div className="t">{t}</div>
++      <div className="t">
++        {t}
++        {sub && <span className="linha-item-sub"> · {sub}</span>}
++      </div>
+       {extra && <div className="extra num">{extra}</div>}
+     </div>
+   );
+ }
++
++/**
++ * Contagem regressiva de uma edicao: dias que faltam para o evento e vendas
++ * que faltam para a meta. So o numero e a frase, sem grafico — como pedido.
++ *
++ * Cada metade so aparece quando a edicao tem aquele dado cadastrado: uma edicao
++ * com data mas sem meta mostra so os dias, e vice-versa.
++ */
++function Contagem({ c }: { c: NonNullable<Metrics['contagemRegressiva']> }) {
++  const dias = c.diasParaEvento;
++  const restantes = c.vendasRestantes;
++  const temDias = dias !== null && c.dataDoEvento;
++  const temMeta = restantes !== null && c.metaDeVendas !== null;
++  if (!temDias && !temMeta) return null;
++
++  return (
++    <section className="contagem">
++      <div className="contagem-titulo">Contagem regressiva · {c.rotulo}</div>
++      <div className="contagem-cartoes">
++        {temDias && (
++          <div className="contagem-cartao">
++            <div className="contagem-frase">
++              {(dias as number) > 0
++                ? 'Faltam para o evento'
++                : (dias as number) === 0
++                  ? 'O evento é'
++                  : 'O evento foi há'}
++            </div>
++            <div className="contagem-numero num">
++              {(dias as number) === 0 ? 'hoje' : numero(Math.abs(dias as number))}
++              {(dias as number) !== 0 && (
++                <span className="contagem-unidade">{Math.abs(dias as number) === 1 ? ' dia' : ' dias'}</span>
++              )}
++            </div>
++            <div className="contagem-nota">Evento em {dataBr(c.dataDoEvento as string)}</div>
++          </div>
++        )}
++        {temMeta && (
++          <div className="contagem-cartao">
++            <div className="contagem-frase">
++              {(restantes as number) > 0 ? 'Faltam para bater a meta' : 'Meta batida'}
++            </div>
++            <div className="contagem-numero num">
++              {(restantes as number) > 0 ? numero(restantes as number) : '✓'}
++              {(restantes as number) > 0 && (
++                <span className="contagem-unidade">{(restantes as number) === 1 ? ' venda' : ' vendas'}</span>
++              )}
++            </div>
++            <div className="contagem-nota">
++              {numero(c.vendasRealizadas)} de {numero(c.metaDeVendas as number)} vendas pagas
++            </div>
++          </div>
++        )}
++      </div>
++    </section>
++  );
++}
+diff --git a/web/src/styles.css b/web/src/styles.css
+index a190701..d81b6b5 100644
+--- a/web/src/styles.css
++++ b/web/src/styles.css
+@@ -168,6 +168,20 @@ body {
+ .heroi-sinal.positivo { color: var(--positivo); }
+ .heroi-sinal.negativo { color: var(--negativo); }
+ 
++/* ---------- Contagem regressiva ---------- */
++.contagem { padding: 22px 0 6px; border-bottom: 1px solid var(--divisoria); }
++.contagem-titulo { font-size: 12.5px; color: var(--texto-fraco); font-weight: 500; margin-bottom: 12px; }
++.contagem-cartoes { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0; }
++.contagem-cartao { padding: 2px 20px 20px; border-left: 1px solid var(--divisoria); }
++.contagem-cartao:first-child { border-left: 0; padding-left: 0; }
++.contagem-frase { font-size: 13px; color: var(--texto-fraco); }
++.contagem-numero {
++  font-size: 38px; font-weight: 700; line-height: 1.1;
++  letter-spacing: -0.02em; margin-top: 4px; color: var(--acento);
++}
++.contagem-unidade { font-size: 17px; font-weight: 500; }
++.contagem-nota { font-size: 12px; color: var(--texto-fraco); margin-top: 6px; }
++
+ /* ---------- Metricas secundarias ---------- */
+ .metricas {
+   display: grid; grid-template-columns: repeat(5, 1fr);
+@@ -190,6 +204,7 @@ body {
+ .linha-item:nth-child(3n + 1) { border-left: 0; padding-left: 0; }
+ .bloco-valor { font-size: 20px; font-weight: 400; letter-spacing: -0.015em; }
+ .linha-item .t { font-size: 12.5px; color: var(--texto-fraco); margin-top: 4px; }
++.linha-item-sub { color: var(--texto-fraco); }
+ .linha-item .extra { font-size: 12px; color: var(--texto-fraco); margin-top: 6px; }
+ 
+ /* ---------- Grafico ---------- */
+@@ -299,6 +314,9 @@ code.mono { font-family: inherit; background: var(--superficie); padding: 2px 7p
+   .heroi-valor { font-size: 40px; }
+   .linhas { grid-template-columns: 1fr; }
+   .linha-item { border-left: 0; padding-left: 0; }
++  .contagem-cartoes { grid-template-columns: 1fr; }
++  .contagem-cartao { border-left: 0; padding-left: 0; }
++  .contagem-cartao:last-child { border-top: 1px solid var(--divisoria); padding-top: 16px; margin-top: 4px; }
+ }
+ 
+ /* Aviso discreto da janela de datas de uma edicao (ver explicarVigencia). */
+-- 
+2.43.0
+

@@ -1,0 +1,337 @@
+/** Transforma as celulas cruas das abas nas linhas normalizadas que o painel usa. */
+import type {
+  AmbassadorRow,
+  AppConfig,
+  BuyerRow,
+  DataSet,
+  LeadRow,
+  TrafficRow,
+} from '../../shared/types.js';
+import { extractTags, normalizeText, parseDate, parseMoney, resolveColumnIndex } from './normalize.js';
+import { compileMatcher, matchEdition, matchTicketKind } from './matching.js';
+import { hasCredentials, readTab } from './sheets.js';
+import { buildDemoDataSet } from './demo.js';
+import { fetchGreennSales } from './greenn.js';
+
+function cell(row: string[], index: number): string {
+  if (index < 0) return '';
+  return (row[index] ?? '').toString().trim();
+}
+
+export async function fetchDataSet(config: AppConfig): Promise<DataSet> {
+  if (!hasCredentials()) {
+    const demo = buildDemoDataSet(config);
+    try {
+      const greennResult = await fetchGreennSales();
+      return {
+        ...demo,
+        greennSales: greennResult.sales,
+        greennProfiles: greennResult.profiles,
+        warnings: [
+          ...demo.warnings,
+          ...(greennResult.profiles.length > 0
+            ? greennResult.warnings
+            : ['Greenn: nenhum perfil foi configurado.']),
+        ],
+      };
+    } catch (error) {
+      return {
+        ...demo,
+        warnings: [
+          ...demo.warnings,
+          `Greenn: ${error instanceof Error ? error.message : String(error)}`,
+        ],
+      };
+    }
+  }
+
+  const matcher = compileMatcher(config);
+  const warnings: string[] = [];
+  const falhas: string[] = [];
+
+  const fonteEmbaixadores = config.sources.ambassadors;
+  const [leadsRaw, buyersRaw, trafficRaw, embaixadoresRaw, greennResult] = await Promise.all([
+    readTabSafe(config.sources.leads.spreadsheetId, config.sources.leads.tab, 'leads', falhas),
+    readTabSafe(config.sources.buyers.spreadsheetId, config.sources.buyers.tab, 'compradores', falhas),
+    readTabSafe(config.sources.traffic.spreadsheetId, config.sources.traffic.tab, 'trafego', falhas),
+    fonteEmbaixadores
+      ? readTabSafe(fonteEmbaixadores.spreadsheetId, fonteEmbaixadores.tab, 'embaixadores', falhas)
+      : Promise.resolve([] as string[][]),
+    fetchGreennSales().then((result) => ({ result, error: null as string | null }))
+      .catch((error) => ({
+        result: { sales: [], profiles: [] },
+        error: error instanceof Error ? error.message : String(error),
+      })),
+  ]);
+  if (greennResult.error) warnings.push(`Greenn: ${greennResult.error}`);
+
+  // --- Leads ---
+  const leadsHeaderIndex = config.sources.leads.headerRow - 1;
+  const leadsHeader = leadsRaw[leadsHeaderIndex] ?? [];
+  const leadsDateCol = resolveColumnIndex(config.sources.leads.columns.date, leadsHeader);
+  const leadsEventCol = resolveColumnIndex(config.sources.leads.columns.event, leadsHeader);
+  if (leadsEventCol < 0 && leadsRaw.length > 0) {
+    warnings.push(
+      `Nao encontrei a coluna de evento na aba "${config.sources.leads.tab}". ` +
+        'Confira o nome da coluna na tela de Configuracao.',
+    );
+  }
+
+  const leads: LeadRow[] = [];
+  for (let i = leadsHeaderIndex + 1; i < leadsRaw.length; i += 1) {
+    const row = leadsRaw[i];
+    if (!row || row.length === 0) continue;
+    const rawEvent = cell(row, leadsEventCol);
+    const date = parseDate(cell(row, leadsDateCol));
+    if (!rawEvent && !date) continue;
+    const match = matchEdition(matcher, rawEvent, date);
+    leads.push({
+      date,
+      rawEvent,
+      editionId: match?.editionId ?? null,
+      lineId: match?.lineId ?? null,
+    });
+  }
+
+  // --- Compradores ---
+  const buyersHeaderIndex = config.sources.buyers.headerRow - 1;
+  const buyersHeader = buyersRaw[buyersHeaderIndex] ?? [];
+  const buyersDateCol = resolveColumnIndex(config.sources.buyers.columns.date, buyersHeader);
+  const buyersEventCol = resolveColumnIndex(config.sources.buyers.columns.event, buyersHeader);
+  const buyersTypeCol = resolveColumnIndex(config.sources.buyers.columns.ticketType, buyersHeader);
+  const buyersAmbCol = config.sources.buyers.columns.ambassador
+    ? resolveColumnIndex(config.sources.buyers.columns.ambassador, buyersHeader)
+    : -1;
+  const buyersValorCol = config.sources.buyers.columns.valor
+    ? resolveColumnIndex(config.sources.buyers.columns.valor, buyersHeader)
+    : -1;
+  if (config.sources.buyers.columns.valor && buyersValorCol < 0 && buyersRaw.length > 0) {
+    warnings.push(
+      `Nao encontrei a coluna de valor ("${config.sources.buyers.columns.valor}") na aba de compradores. ` +
+        'O faturamento esta sendo calculado pelo preco de tabela.',
+    );
+  }
+
+  // Produtos que compartilham nome com um evento mas nao sao venda de ingresso.
+  const ignorados = new Set((config.produtosIgnorados ?? []).map((nome) => normalizeText(nome)));
+  let linhasIgnoradas = 0;
+
+  const buyers: BuyerRow[] = [];
+  for (let i = buyersHeaderIndex + 1; i < buyersRaw.length; i += 1) {
+    const row = buyersRaw[i];
+    if (!row || row.length === 0) continue;
+    const rawEvent = cell(row, buyersEventCol);
+    const rawTicketType = cell(row, buyersTypeCol);
+    const ambassador = cell(row, buyersAmbCol);
+    if (!rawEvent && !rawTicketType && !ambassador) continue;
+    if (ignorados.has(normalizeText(rawEvent))) {
+      linhasIgnoradas += 1;
+      continue;
+    }
+    const date = parseDate(cell(row, buyersDateCol));
+    const match = matchEdition(matcher, rawEvent, date);
+    buyers.push({
+      linha: i + 1,
+      valor: buyersValorCol >= 0 ? parseMoney(cell(row, buyersValorCol)) : null,
+      date,
+      rawEvent,
+      editionId: match?.editionId ?? null,
+      lineId: match?.lineId ?? null,
+      ticketKind: matchTicketKind(matcher, rawTicketType),
+      rawTicketType,
+      ambassador,
+    });
+  }
+
+  // --- Trafego ---
+  const trafficHeaderIndex = config.sources.traffic.headerRow - 1;
+  const trafficHeader = trafficRaw[trafficHeaderIndex] ?? [];
+  const trafficDateCol = resolveColumnIndex(config.sources.traffic.columns.date, trafficHeader);
+  const trafficCampaignCol = resolveColumnIndex(config.sources.traffic.columns.campaign, trafficHeader);
+  const trafficCostCol = resolveColumnIndex(config.sources.traffic.columns.cost, trafficHeader);
+
+  // Campanhas de outros produtos da empresa: a planilha de trafego e o plano de
+  // midia inteiro, e o gasto delas so aparecia como "custo sem evento".
+  // Cada entrada e uma tag entre colchetes ou o nome inteiro da campanha.
+  const ignorarCampanha = new Set(
+    (config.campanhasIgnoradas ?? []).map((entrada) => normalizeText(entrada)).filter(Boolean),
+  );
+  // Quanto cada entrada apagou. Uma entrada que apaga demais (uma tag generica)
+  // ou de menos (erro de digitacao) so aparece se alguem contar.
+  const apagadasPorEntrada = new Map<string, number>();
+
+  const traffic: TrafficRow[] = [];
+  for (let i = trafficHeaderIndex + 1; i < trafficRaw.length; i += 1) {
+    const row = trafficRaw[i];
+    if (!row || row.length === 0) continue;
+    const campaign = cell(row, trafficCampaignCol);
+    const date = parseDate(cell(row, trafficDateCol));
+    // Sem data valida na coluna A a linha nao pertence a tabela diaria (rodape,
+    // bloco de totais, area de anotacao). Descartar evita somar lixo no custo.
+    if (!date || !campaign) continue;
+    const match = matchEdition(matcher, campaign, date);
+    // A lista de ignorar so tem forca sobre campanha que o painel NAO consegue
+    // atribuir a um evento. Se ela casa com um evento, o gasto e do evento e
+    // fica — mesmo que a lista peca para apagar.
+    //
+    // Sem esta trava a lista poderia comer dinheiro de evento em silencio, que
+    // e justamente o que ela existe para evitar em outro lugar. Ela tambem tira
+    // o peso de escolher entre apagar por tag ou por nome inteiro: mesmo uma
+    // tag generica demais nunca apaga um evento reconhecido.
+    if (!match && ignorarCampanha.size > 0) {
+      const nomeInteiro = normalizeText(campaign);
+      const motivo = ignorarCampanha.has(nomeInteiro)
+        ? nomeInteiro
+        : extractTags(campaign).find((tag) => ignorarCampanha.has(tag));
+      if (motivo) {
+        apagadasPorEntrada.set(motivo, (apagadasPorEntrada.get(motivo) ?? 0) + 1);
+        continue;
+      }
+    }
+    traffic.push({
+      date,
+      campaign,
+      editionId: match?.editionId ?? null,
+      lineId: match?.lineId ?? null,
+      cost: parseMoney(cell(row, trafficCostCol)),
+    });
+  }
+
+  if (linhasIgnoradas > 0) {
+    console.log(`[loader] ${linhasIgnoradas} linha(s) ignoradas por produtosIgnorados`);
+  }
+  for (const [entrada, quantas] of apagadasPorEntrada) {
+    console.log(`[loader] campanhasIgnoradas "${entrada}": ${quantas} linha(s) de trafego fora`);
+  }
+  for (const entrada of ignorarCampanha) {
+    if (!apagadasPorEntrada.has(entrada)) {
+      warnings.push(
+        `A campanha "${entrada}", marcada para ser ignorada, nao existe na planilha de trafego. ` +
+          'Confira a grafia em "Ajustes avancados" — do jeito que esta, ela nao esta apagando nada.',
+      );
+    }
+  }
+
+  // --- Embaixadores ---
+  //
+  // Quando ha aba dedicada, os convites vem dela. Ela tem coluna de evento, entao
+  // da para contar por evento sem casar linha a linha com a aba de vendas — o que
+  // seria frageil, porque as duas abas nao compartilham nenhuma chave confiavel.
+  let ambassadors: AmbassadorRow[];
+  if (fonteEmbaixadores) {
+    const cabecalho = embaixadoresRaw[fonteEmbaixadores.headerRow - 1] ?? [];
+    const colData = resolveColumnIndex(fonteEmbaixadores.columns.date, cabecalho);
+    const colEvento = resolveColumnIndex(fonteEmbaixadores.columns.event, cabecalho);
+    const colNome = resolveColumnIndex(fonteEmbaixadores.columns.ambassador, cabecalho);
+    if (colNome < 0 && embaixadoresRaw.length > 0) {
+      warnings.push(
+        `Nao encontrei a coluna do embaixador na aba "${fonteEmbaixadores.tab}". ` +
+          'Embaixadores e Convidados vao aparecer zerados.',
+      );
+    }
+    ambassadors = [];
+    for (let i = fonteEmbaixadores.headerRow; i < embaixadoresRaw.length; i += 1) {
+      const row = embaixadoresRaw[i];
+      if (!row) continue;
+      const nome = cell(row, colNome);
+      if (!nome) continue;
+      const rawEvent = cell(row, colEvento);
+      const date = parseDate(cell(row, colData));
+      const match = matchEdition(matcher, rawEvent, date);
+      ambassadors.push({
+        linha: i + 1,
+        date,
+        rawEvent,
+        editionId: match?.editionId ?? null,
+        lineId: match?.lineId ?? null,
+        ambassador: nome,
+      });
+    }
+  } else {
+    // Sem aba dedicada, o convite vem da propria linha de venda, como antes.
+    ambassadors = buyers
+      .filter((row) => row.ambassador.trim() !== '')
+      .map((row) => ({
+        linha: row.linha,
+        date: row.date,
+        rawEvent: row.rawEvent,
+        editionId: row.editionId,
+        lineId: row.lineId,
+        ambassador: row.ambassador,
+      }));
+  }
+
+  return {
+    leads,
+    buyers,
+    traffic,
+    ambassadors,
+    greennSales: greennResult.result.sales,
+    greennProfiles: greennResult.result.profiles,
+    fetchedAt: new Date().toISOString(), warnings, falhas,
+  };
+}
+
+async function readTabSafe(
+  spreadsheetId: string,
+  tab: string,
+  rotulo: string,
+  falhas: string[],
+): Promise<string[][]> {
+  try {
+    return await readTab(spreadsheetId, tab);
+  } catch (error) {
+    const bruto = error instanceof Error ? error.message : String(error);
+    falhas.push(`Aba de ${rotulo} ("${tab}"): ${explicarErroDoGoogle(bruto, tab)}`);
+    return [];
+  }
+}
+
+/**
+ * Traduz o erro tecnico do Google para uma instrucao que qualquer pessoa
+ * consiga seguir. Quem cuida deste painel nao necessariamente programa, e um
+ * erro cru da API nao diz o que clicar para resolver.
+ */
+export function explicarErroDoGoogle(mensagem: string, aba?: string): string {
+  const texto = mensagem.toLowerCase();
+
+  if (texto.includes('has not been used in project') || texto.includes('serviceusage') ||
+      texto.includes('it is disabled') || texto.includes('service_disabled')) {
+    const projeto = mensagem.match(/project (\d+)/)?.[1];
+    const link = projeto
+      ? `https://console.developers.google.com/apis/api/sheets.googleapis.com/overview?project=${projeto}`
+      : 'https://console.cloud.google.com/apis/library/sheets.googleapis.com';
+    return (
+      'a Google Sheets API ainda nao foi ativada no projeto do Google Cloud. ' +
+      `Abra ${link} e clique no botao "Ativar". ` +
+      'Depois espere cerca de 2 minutos e clique em "Atualizar agora" aqui no painel.'
+    );
+  }
+
+  if (texto.includes('permission') || texto.includes('403') || texto.includes('forbidden')) {
+    return (
+      'a conta de robo do painel nao foi convidada para esta planilha. ' +
+      'Abra a planilha, clique em Compartilhar, cole o e-mail da conta de servico ' +
+      '(aparece aqui na tela de Configuracao, em "Verificar conexao com as planilhas") ' +
+      'e conceda a permissao de Leitor.'
+    );
+  }
+
+  if (texto.includes('unable to parse range') || texto.includes('not found')) {
+    return (
+      `nao existe nenhuma aba com esse nome nesta planilha${aba ? ` (procurei por "${aba}")` : ''}. ` +
+      'Clique em "Verificar conexao com as planilhas" para ver os nomes reais das abas ' +
+      'e corrija a grafia em "Ajustes avancados". Acentos e espacos contam.'
+    );
+  }
+
+  if (texto.includes('invalid_grant') || texto.includes('invalid jwt') ||
+      texto.includes('unauthorized_client') || texto.includes('decoder')) {
+    return (
+      'a chave do Google parece incompleta ou invalida. Confira se o conteudo do arquivo .json ' +
+      'foi colado INTEIRO na configuracao GOOGLE_SERVICE_ACCOUNT_JSON, do primeiro { ate o ultimo }.'
+    );
+  }
+
+  return mensagem;
+}

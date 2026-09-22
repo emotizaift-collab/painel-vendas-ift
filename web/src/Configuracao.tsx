@@ -1,0 +1,702 @@
+import React, { useState } from 'react';
+import type { AliasConfig, AppConfig, EventEdition, Metrics, ValorNaoClassificado, Vigencia } from '../../shared/types';
+import { nomeDoApelido, vigenciaDoApelido } from '../../shared/types';
+import { api } from './api';
+
+interface Props {
+  config: AppConfig;
+  naoClassificado: Metrics['naoClassificado'] | null;
+  aoSalvar: (config: AppConfig) => void;
+}
+
+export function Configuracao({ config, naoClassificado, aoSalvar }: Props) {
+  const [rascunho, setRascunho] = useState<AppConfig>(() => clonar(config));
+  const [salvando, setSalvando] = useState(false);
+  const [recado, setRecado] = useState<{ tipo: 'info' | 'erro'; texto: string } | null>(null);
+  const [avancado, setAvancado] = useState(false);
+  const [diagnostico, setDiagnostico] = useState<string | null>(null);
+
+  const alterado = JSON.stringify(rascunho) !== JSON.stringify(config);
+
+  const editions = rascunho.eventLines.flatMap((linha) =>
+    linha.editions.map((ed) => ({ id: ed.id, rotulo: `${linha.label} — ${ed.label}` })),
+  );
+
+  function atualizar(mudanca: (draft: AppConfig) => void) {
+    const copia = clonar(rascunho);
+    mudanca(copia);
+    setRascunho(copia);
+  }
+
+  /** Aplica uma mudança à edição de dado id, achando-a em qualquer linha. */
+  function atualizarEdicao(edicaoId: string, mudanca: (edicao: EventEdition) => void) {
+    atualizar((draft) => {
+      for (const linha of draft.eventLines) {
+        const edicao = linha.editions.find((item) => item.id === edicaoId);
+        if (edicao) {
+          mudanca(edicao);
+          return;
+        }
+      }
+    });
+  }
+
+  function adicionarApelido(edicaoId: string, apelido: string) {
+    const limpo = apelido.trim();
+    if (!limpo) return;
+    atualizar((draft) => {
+      for (const linha of draft.eventLines) {
+        for (const ed of linha.editions) {
+          const jaTem = ed.aliases.some(
+            (a) => nomeDoApelido(a).toLowerCase() === limpo.toLowerCase(),
+          );
+          if (ed.id === edicaoId && !jaTem) {
+            ed.aliases.push(limpo);
+          }
+        }
+      }
+    });
+  }
+
+  function removerApelido(edicaoId: string, apelido: string) {
+    atualizar((draft) => {
+      for (const linha of draft.eventLines) {
+        for (const ed of linha.editions) {
+          if (ed.id === edicaoId) {
+            ed.aliases = ed.aliases.filter((a) => nomeDoApelido(a) !== apelido);
+          }
+        }
+      }
+    });
+  }
+
+  async function salvar() {
+    setSalvando(true);
+    setRecado(null);
+    try {
+      const salvo = await api.salvarConfig(rascunho);
+      setRascunho(clonar(salvo));
+      aoSalvar(salvo);
+      setRecado({ tipo: 'info', texto: 'Configuração salva. O painel já está usando as regras novas.' });
+    } catch (erro) {
+      setRecado({ tipo: 'erro', texto: erro instanceof Error ? erro.message : String(erro) });
+    } finally {
+      setSalvando(false);
+    }
+  }
+
+  async function restaurar() {
+    if (!confirm('Isso apaga as suas alterações e volta tudo para o padrão de fábrica. Continuar?')) return;
+    setSalvando(true);
+    try {
+      const padrao = await api.restaurarConfig();
+      setRascunho(clonar(padrao));
+      aoSalvar(padrao);
+      setRecado({ tipo: 'info', texto: 'Configuração restaurada para o padrão.' });
+    } catch (erro) {
+      setRecado({ tipo: 'erro', texto: erro instanceof Error ? erro.message : String(erro) });
+    } finally {
+      setSalvando(false);
+    }
+  }
+
+  async function rodarDiagnostico() {
+    setDiagnostico('Verificando...');
+    try {
+      const resultado = await api.diagnostico();
+      setDiagnostico(JSON.stringify(resultado, null, 2));
+    } catch (erro) {
+      setDiagnostico(erro instanceof Error ? erro.message : String(erro));
+    }
+  }
+
+  const sugestoes = juntarSugestoes(naoClassificado);
+
+  return (
+    <>
+      {recado && <div className={`aviso ${recado.tipo === 'erro' ? 'erro' : 'info'}`}>{recado.texto}</div>}
+
+      <div className="config-secao">
+        <h2>Nomes e apelidos dos eventos</h2>
+        <p className="explica">
+          O painel junta tudo o que estiver listado aqui embaixo como sendo o mesmo evento. Se um dia o
+          evento mudar de nome, é só adicionar o nome novo na caixinha — não precisa mexer em programação.
+          Vale tanto para a sigla usada no tráfego pago (ex.: <code className="mono">DAI</code>) quanto para
+          o nome por extenso usado nas planilhas de leads e de compradores.
+        </p>
+        <p className="explica">
+          Em cada edição você também pode preencher a <strong>data do evento</strong> e a{' '}
+          <strong>meta de vendas</strong>. Com elas, o painel de Eventos Presenciais mostra, para a edição
+          escolhida, quantos dias faltam para o evento e quantas vendas ainda faltam para bater a meta.
+          Deixe em branco para não mostrar a contagem.
+        </p>
+
+        {rascunho.eventLines.map((linha) => (
+          <div className="linha-evento" key={linha.id}>
+            <header>
+              <h4>{linha.label}</h4>
+            </header>
+            {linha.editions.map((ed) => (
+              <div className="edicao" key={ed.id}>
+                <div className="edicao-titulo">
+                  <strong>{ed.label}</strong>
+                  {ed.current && <span className="tag-atual">Nome atual</span>}
+                </div>
+                {ed.vigencia && <p className="edicao-vigencia">{explicarVigencia(ed.vigencia)}</p>}
+
+                <div className="filtros" style={{ margin: '0 0 12px', background: 'transparent', border: 0, padding: 0 }}>
+                  <div className="campo">
+                    <label>Data do evento</label>
+                    <input
+                      type="date"
+                      value={ed.dataDoEvento ?? ''}
+                      onChange={(e) =>
+                        atualizarEdicao(ed.id, (edicao) => {
+                          const v = e.target.value.trim();
+                          if (v) edicao.dataDoEvento = v;
+                          else delete edicao.dataDoEvento;
+                        })
+                      }
+                    />
+                  </div>
+                  <div className="campo">
+                    <label>Meta de vendas</label>
+                    <input
+                      type="number"
+                      min="1"
+                      step="1"
+                      placeholder="sem meta"
+                      value={ed.metaDeVendas ?? ''}
+                      onChange={(e) =>
+                        atualizarEdicao(ed.id, (edicao) => {
+                          const v = e.target.value.trim();
+                          if (v === '') delete edicao.metaDeVendas;
+                          else edicao.metaDeVendas = Math.max(1, Math.trunc(Number(v) || 0));
+                        })
+                      }
+                      style={{ minWidth: 130 }}
+                    />
+                  </div>
+                </div>
+
+                <div className="apelidos">
+                  {ed.aliases.map((apelido) => (
+                    <Apelido
+                      key={nomeDoApelido(apelido)}
+                      apelido={apelido}
+                      vigenciaDaEdicao={ed.vigencia}
+                      aoRemover={() => removerApelido(ed.id, nomeDoApelido(apelido))}
+                    />
+                  ))}
+                  <CampoNovoApelido aoAdicionar={(valor) => adicionarApelido(ed.id, valor)} />
+                </div>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+
+      {sugestoes.length > 0 && (
+        <div className="config-secao">
+          <h2>Nomes que o painel não reconheceu</h2>
+          <p className="explica">
+            Estes valores apareceram nas planilhas mas não batem com nenhum apelido cadastrado, então
+            <strong> não estão sendo contados em lugar nenhum</strong>. Se algum deles for de um dos seus
+            eventos, escolha a qual pertence e clique em Adicionar. Se não for (é de outro produto da
+            empresa), pode ignorar.
+          </p>
+
+          {naoClassificado?.resumo && <ResumoDoQueFalta resumo={naoClassificado.resumo} />}
+          <table className="tabela">
+            <thead>
+              <tr>
+                <th>Valor encontrado</th>
+                <th>Onde apareceu</th>
+                <th style={{ whiteSpace: 'nowrap' }}>Tamanho</th>
+                <th style={{ width: 340 }}>Pertence a</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sugestoes.map((sugestao) => (
+                <LinhaSugestao
+                  key={`${sugestao.origem}:${sugestao.valor}`}
+                  sugestao={sugestao}
+                  editions={editions}
+                  aoAdicionar={adicionarApelido}
+                />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div className="config-secao">
+        <h2>Preço do ingresso</h2>
+        <p className="explica">
+          Valor de referência de uma cadeira. Os tipos que estão com o preço em branco na seção abaixo
+          usam este valor multiplicado pelo número de cadeiras — mudar aqui ajusta individual, duplo e
+          triplo de uma vez. Ingressos com valor próprio (como o VIP) não são afetados.
+        </p>
+        <div className="campo">
+          <label htmlFor="preco">Preço em reais</label>
+          <input
+            id="preco"
+            type="number"
+            step="0.01"
+            min="0"
+            value={rascunho.ticketPrice}
+            onChange={(evento) =>
+              atualizar((draft) => {
+                draft.ticketPrice = Number(evento.target.value);
+              })
+            }
+          />
+        </div>
+      </div>
+
+      <div className="config-secao">
+        <h2>Tipos de ingresso e preços</h2>
+        <p className="explica">
+          Cada linha é um tipo de ingresso que aparece na planilha. <strong>Preço vazio</strong> significa
+          "use o preço base acima multiplicado pelas cadeiras" — é assim que individual, duplo e triplo
+          acompanham automaticamente qualquer mudança no preço base. Preencha o preço só nos ingressos que
+          têm valor próprio, como o VIP.
+        </p>
+        <p className="explica">
+          <strong>Cadeiras</strong> é quantas pessoas o ingresso leva ao evento. Vale <strong>0</strong> em
+          dois casos especiais: o convite de embaixador (o convidado já é contado pela coluna do embaixador)
+          e o acompanhante (a segunda pessoa do duplo, cuja cadeira já foi contada no ingresso do comprador).
+          Por isso esses dois não contam como venda.
+        </p>
+
+        {rascunho.ticketTypes.map((tipo, indice) => (
+          <div className="linha-evento" key={tipo.id}>
+            <header>
+              <h4>{tipo.label}</h4>
+              <span style={{ fontSize: 12, color: tipo.contaComoVenda ? 'var(--texto)' : 'var(--texto-fraco)' }}>
+                {tipo.contaComoVenda
+                  ? `vale ${precoVisivel(tipo, rascunho.ticketPrice)}`
+                  : 'não entra no faturamento'}
+              </span>
+            </header>
+
+            <div className="filtros" style={{ margin: 0, background: 'transparent', border: 0, padding: 0 }}>
+              <div className="campo">
+                <label>Nome que aparece no painel</label>
+                <input
+                  value={tipo.label}
+                  onChange={(e) =>
+                    atualizar((d) => {
+                      d.ticketTypes[indice].label = e.target.value;
+                    })
+                  }
+                />
+              </div>
+              <div className="campo">
+                <label>Preço próprio (R$)</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  placeholder="usa o preço base"
+                  value={tipo.preco === null ? '' : tipo.preco}
+                  onChange={(e) =>
+                    atualizar((d) => {
+                      const texto = e.target.value.trim();
+                      d.ticketTypes[indice].preco = texto === '' ? null : Number(texto);
+                    })
+                  }
+                  style={{ minWidth: 150 }}
+                />
+              </div>
+              <div className="campo">
+                <label>Cadeiras</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  value={tipo.cadeiras}
+                  onChange={(e) =>
+                    atualizar((d) => {
+                      d.ticketTypes[indice].cadeiras = Math.max(0, Number(e.target.value) || 0);
+                    })
+                  }
+                  style={{ minWidth: 90 }}
+                />
+              </div>
+              <div className="campo">
+                <label>Conta como venda?</label>
+                <select
+                  value={tipo.contaComoVenda ? 'sim' : 'nao'}
+                  onChange={(e) =>
+                    atualizar((d) => {
+                      d.ticketTypes[indice].contaComoVenda = e.target.value === 'sim';
+                    })
+                  }
+                  style={{ minWidth: 110 }}
+                >
+                  <option value="sim">Sim</option>
+                  <option value="nao">Não</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="edicao" style={{ marginTop: 12, marginBottom: 0 }}>
+              <div className="edicao-titulo">
+                <strong>Como aparece escrito na planilha</strong>
+              </div>
+              <div className="apelidos">
+                {tipo.aliases.map((apelido) => (
+                  <span className="apelido" key={apelido}>
+                    {apelido}
+                    <button
+                      type="button"
+                      title="Remover"
+                      onClick={() =>
+                        atualizar((d) => {
+                          d.ticketTypes[indice].aliases = d.ticketTypes[indice].aliases.filter(
+                            (a) => a !== apelido,
+                          );
+                        })
+                      }
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+                <CampoNovoApelido
+                  aoAdicionar={(valor) =>
+                    atualizar((d) => {
+                      const limpo = valor.trim();
+                      const lista = d.ticketTypes[indice].aliases;
+                      if (limpo && !lista.some((a) => a.toLowerCase() === limpo.toLowerCase())) {
+                        lista.push(limpo);
+                      }
+                    })
+                  }
+                />
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="config-secao">
+        <h2>Ajustes avançados</h2>
+        <p className="explica">
+          De onde o painel lê os dados. Só mexa aqui se alguma aba for renomeada ou se as planilhas
+          mudarem de lugar. O botão de verificação mostra os nomes reais das abas de cada planilha.
+        </p>
+        <div className="barra-acoes">
+          <button type="button" className="botao" onClick={() => setAvancado((v) => !v)}>
+            {avancado ? 'Esconder' : 'Mostrar'} ajustes avançados
+          </button>
+          <button type="button" className="botao" onClick={rodarDiagnostico}>
+            Verificar conexão com as planilhas
+          </button>
+        </div>
+
+        {avancado && (
+          <div style={{ marginTop: 16 }}>
+            {(['leads', 'buyers', 'traffic'] as const).map((chave) => (
+              <div className="linha-evento" key={chave}>
+                <header>
+                  <h4>{rotuloFonte(chave)}</h4>
+                </header>
+                <div className="filtros" style={{ margin: 0, background: 'transparent', border: 0, padding: 0 }}>
+                  <div className="campo">
+                    <label>ID da planilha</label>
+                    <input
+                      value={rascunho.sources[chave].spreadsheetId}
+                      onChange={(e) =>
+                        atualizar((d) => {
+                          d.sources[chave].spreadsheetId = e.target.value.trim();
+                        })
+                      }
+                    />
+                  </div>
+                  <div className="campo">
+                    <label>Nome da aba</label>
+                    <input
+                      value={rascunho.sources[chave].tab}
+                      onChange={(e) =>
+                        atualizar((d) => {
+                          d.sources[chave].tab = e.target.value;
+                        })
+                      }
+                    />
+                  </div>
+                  <div className="campo">
+                    <label>Linha do cabeçalho</label>
+                    <input
+                      type="number"
+                      min="1"
+                      value={rascunho.sources[chave].headerRow}
+                      onChange={(e) =>
+                        atualizar((d) => {
+                          d.sources[chave].headerRow = Math.max(1, Number(e.target.value) || 1);
+                        })
+                      }
+                    />
+                  </div>
+                  {Object.keys(rascunho.sources[chave].columns).map((coluna) => (
+                    <div className="campo" key={coluna}>
+                      <label>{rotuloColuna(coluna)}</label>
+                      <input
+                        style={{ minWidth: 120 }}
+                        value={(rascunho.sources[chave].columns as unknown as Record<string, string>)[coluna]}
+                        onChange={(e) =>
+                          atualizar((d) => {
+                            (d.sources[chave].columns as unknown as Record<string, string>)[coluna] = e.target.value.trim();
+                          })
+                        }
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {diagnostico && (
+          <pre
+            style={{
+              background: 'var(--fundo)', border: '1px solid var(--divisoria)', borderRadius: 3,
+              padding: 14, fontSize: 12, overflowX: 'auto', marginTop: 14, lineHeight: 1.5,
+            }}
+          >
+            {diagnostico}
+          </pre>
+        )}
+      </div>
+
+      <div className="barra-acoes">
+        <button type="button" className="botao primario" disabled={!alterado || salvando} onClick={salvar}>
+          {salvando ? 'Salvando...' : alterado ? 'Salvar alterações' : 'Nada para salvar'}
+        </button>
+        <button type="button" className="botao perigo" disabled={salvando} onClick={restaurar}>
+          Restaurar padrão
+        </button>
+        {alterado && <span style={{ fontSize: 13, color: 'var(--acento)' }}>Você tem alterações não salvas.</span>}
+      </div>
+    </>
+  );
+}
+
+function CampoNovoApelido({ aoAdicionar }: { aoAdicionar: (valor: string) => void }) {
+  const [valor, setValor] = useState('');
+  return (
+    <input
+      placeholder="+ adicionar apelido"
+      value={valor}
+      onChange={(e) => setValor(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          aoAdicionar(valor);
+          setValor('');
+        }
+      }}
+      onBlur={() => {
+        if (valor.trim()) {
+          aoAdicionar(valor);
+          setValor('');
+        }
+      }}
+    />
+  );
+}
+
+interface Sugestao {
+  valor: string;
+  origem: string;
+  linhas: number;
+  custo?: number;
+}
+
+function LinhaSugestao({
+  sugestao, editions, aoAdicionar,
+}: {
+  sugestao: Sugestao;
+  editions: Array<{ id: string; rotulo: string }>;
+  aoAdicionar: (edicaoId: string, valor: string) => void;
+}) {
+  const [destino, setDestino] = useState(editions[0]?.id ?? '');
+  const [pronto, setPronto] = useState(false);
+
+  return (
+    <tr>
+      <td><code className="mono">{sugestao.valor}</code></td>
+      <td style={{ color: 'var(--texto-fraco)' }}>{sugestao.origem}</td>
+      <td style={{ color: 'var(--texto-fraco)', whiteSpace: 'nowrap' }}>
+        {sugestao.linhas.toLocaleString('pt-BR')} linha{sugestao.linhas === 1 ? '' : 's'}
+        {sugestao.custo !== undefined && sugestao.custo > 0 && (
+          <>
+            <br />
+            {sugestao.custo.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}
+          </>
+        )}
+      </td>
+      <td>
+        {pronto ? (
+          <span style={{ color: 'var(--positivo)', fontSize: 13 }}>Adicionado — lembre de salvar</span>
+        ) : (
+          <div style={{ display: 'flex', gap: 8 }}>
+            <select value={destino} onChange={(e) => setDestino(e.target.value)} style={{ flex: 1 }}>
+              {editions.map((ed) => (
+                <option key={ed.id} value={ed.id}>{ed.rotulo}</option>
+              ))}
+            </select>
+            <button
+              type="button"
+              className="botao"
+              onClick={() => {
+                aoAdicionar(destino, sugestao.valor);
+                setPronto(true);
+              }}
+            >
+              Adicionar
+            </button>
+          </div>
+        )}
+      </td>
+    </tr>
+  );
+}
+
+/** O tamanho do problema. Uma lista de valores distintos nao mostra quantas linhas somem. */
+function ResumoDoQueFalta({ resumo }: { resumo: Metrics['naoClassificado']['resumo'] }) {
+  const itens = [
+    { n: resumo.comprasSemTipo, t: 'compras com tipo de ingresso não reconhecido — não entram no faturamento nem nos participantes' },
+    { n: resumo.leadsIgnorados, t: 'leads com nome de evento não reconhecido — não entram na contagem de leads' },
+    { n: resumo.comprasSemEvento, t: 'compras com nome de evento não reconhecido' },
+  ].filter((item) => item.n > 0);
+
+  if (itens.length === 0 && resumo.custoSemEvento === 0) return null;
+
+  return (
+    <div className="aviso alerta" style={{ marginBottom: 16 }}>
+      <strong>O que está ficando de fora hoje:</strong>
+      <ul>
+        {itens.map((item) => (
+          <li key={item.t}>
+            <strong>{item.n.toLocaleString('pt-BR')}</strong> {item.t}
+          </li>
+        ))}
+        {resumo.custoSemEvento > 0 && (
+          <li>
+            <strong>
+              {resumo.custoSemEvento.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}
+            </strong>{' '}
+            em campanhas de eventos não reconhecidos. Boa parte disso é de outros produtos da empresa e
+            deve mesmo ficar de fora — confira a lista abaixo antes de adicionar qualquer coisa.
+          </li>
+        )}
+      </ul>
+    </div>
+  );
+}
+
+function juntarSugestoes(nc: Metrics['naoClassificado'] | null): Sugestao[] {
+  if (!nc) return [];
+  const grupos: Array<[ValorNaoClassificado[], string]> = [
+    [nc.campanhas, 'Tráfego pago'],
+    [nc.eventosLeads, 'Planilha de leads'],
+    [nc.eventosCompradores, 'Planilha de compradores'],
+  ];
+  const vistos = new Set<string>();
+  const saida: Sugestao[] = [];
+  for (const [valores, origem] of grupos) {
+    for (const item of valores) {
+      const chave = item.valor.toLowerCase();
+      if (vistos.has(chave)) continue;
+      vistos.add(chave);
+      saida.push({ valor: item.valor, origem, linhas: item.linhas, custo: item.custo });
+    }
+  }
+  return saida.slice(0, 60);
+}
+
+function rotuloFonte(chave: 'leads' | 'buyers' | 'traffic'): string {
+  if (chave === 'leads') return 'Planilha de leads (Interessados Eventos Presenciais)';
+  if (chave === 'buyers') return 'Planilha de compradores (Cópia Compradores Presenciais)';
+  return 'Planilha de tráfego pago (PLAN PARA DASH)';
+}
+
+function rotuloColuna(coluna: string): string {
+  const mapa: Record<string, string> = {
+    date: 'Coluna da data',
+    event: 'Coluna do evento',
+    ticketType: 'Coluna do tipo de ingresso',
+    ambassador: 'Coluna do embaixador',
+    campaign: 'Coluna do nome da campanha',
+    cost: 'Coluna do custo',
+  };
+  return mapa[coluna] ?? coluna;
+}
+
+/** Mostra o valor efetivo do tipo, calculado ou fixo. */
+function precoVisivel(tipo: AppConfig['ticketTypes'][number], precoBase: number): string {
+  const valor = tipo.preco === null ? precoBase * tipo.cadeiras : tipo.preco;
+  const reais = valor.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+  return tipo.preco === null ? `${reais} (calculado)` : reais;
+}
+
+function clonar<T>(valor: T): T {
+  return JSON.parse(JSON.stringify(valor)) as T;
+}
+
+
+/**
+ * Um apelido na tela. Quando ele so vale num periodo, a janela aparece junto —
+ * sem isso, quem edita aqui nao tem como saber por que aquele apelido "nao
+ * funciona" em parte das linhas, e a explicacao mais provavel que a pessoa vai
+ * dar a si mesma e que o painel esta errado.
+ */
+function Apelido({
+  apelido,
+  vigenciaDaEdicao,
+  aoRemover,
+}: {
+  apelido: AliasConfig;
+  vigenciaDaEdicao?: Vigencia;
+  aoRemover: () => void;
+}) {
+  const propria = typeof apelido === 'string' ? undefined : apelido.vigencia;
+  const janela = vigenciaDoApelido(apelido, vigenciaDaEdicao);
+  return (
+    <span className="apelido" title={janela ? explicarVigencia(janela) : undefined}>
+      {nomeDoApelido(apelido)}
+      {propria && <small className="apelido-vigencia">{resumirVigencia(propria)}</small>}
+      <button type="button" title="Remover este apelido" onClick={aoRemover}>
+        ×
+      </button>
+    </span>
+  );
+}
+
+const diaBr = (iso: string) => iso.split('-').reverse().join('/');
+
+/** Versao curta, para caber ao lado do apelido. */
+function resumirVigencia(vigencia: Vigencia): string {
+  if (vigencia.de && vigencia.ate) return ` ${diaBr(vigencia.de)}–${diaBr(vigencia.ate)}`;
+  if (vigencia.de) return ` a partir de ${diaBr(vigencia.de)}`;
+  if (vigencia.ate) return ` ate ${diaBr(vigencia.ate)}`;
+  return '';
+}
+
+/**
+ * Explica, em portugues, a janela de datas de uma edicao. Sem isso, quem edita
+ * os apelidos aqui nao tem como saber que aquele apelido so vale num periodo —
+ * e um apelido que "nao funciona" sem explicacao vira reclamacao ou, pior,
+ * numero errado.
+ */
+function explicarVigencia(vigencia: Vigencia): string {
+  if (vigencia.de && vigencia.ate) {
+    return `Só vale para linhas com data entre ${diaBr(vigencia.de)} e ${diaBr(vigencia.ate)}.`;
+  }
+  if (vigencia.de) return `Só vale para linhas a partir de ${diaBr(vigencia.de)}.`;
+  if (vigencia.ate) return `Só vale para linhas até ${diaBr(vigencia.ate)}.`;
+  return '';
+}
