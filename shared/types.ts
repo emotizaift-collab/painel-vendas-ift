@@ -333,7 +333,7 @@ export interface ContagemRegressiva {
   diasParaEvento: number | null;
   /** Meta de vendas cadastrada, ou null. */
   metaDeVendas: number | null;
-  /** Vendas pagas ja realizadas para a edicao, acumuladas ate hoje. */
+  /** Unidades acumuladas: vendas pagas + convidados + embaixadores. */
   vendasRealizadas: number;
   /** Meta menos realizadas. Pode ser <= 0 (meta batida). Null quando nao ha meta. */
   vendasRestantes: number | null;

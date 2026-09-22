@@ -220,6 +220,7 @@
           "id": "anima-ed-01",
           "label": "#01  ÂNIMA Day Training",
           "current": true,
+          "metaDeVendas": 80,
           "aliases": [
             "#01  ÂNIMA Day Training",
             "ANIMADAY",
@@ -293,6 +294,7 @@
           "id": "fp-ed-05",
           "label": "#05 🎤 DAY TRAINING – FORMAÇÃO DE PALESTRANTES com Professor Massaru Ogata",
           "current": true,
+          "metaDeVendas": 80,
           "aliases": [
             "#05 🎤 DAY TRAINING – FORMAÇÃO DE PALESTRANTES com Professor Massaru Ogata"
           ]

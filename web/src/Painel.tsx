@@ -423,7 +423,7 @@ function Contagem({ c }: { c: NonNullable<Metrics['contagemRegressiva']> }) {
               )}
             </div>
             <div className="contagem-nota">
-              {numero(c.vendasRealizadas)} de {numero(c.metaDeVendas as number)} vendas pagas
+              {numero(c.vendasRealizadas)} de {numero(c.metaDeVendas as number)} unidades
             </div>
           </div>
         )}

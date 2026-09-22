@@ -51,25 +51,21 @@ function edicaoEmFoco(config: AppConfig, filter: MetricsFilter): EventEdition | 
  * Monta a contagem regressiva da edicao em foco, ou null quando nao ha edicao
  * unica ou ela nao tem data nem meta cadastrada.
  *
- * vendasRealizadas conta TODAS as vendas pagas da edicao ate hoje — sem recorte
- * de data nem de campanha —, porque a meta e cumulativa. So diasParaEvento
- * depende de `hoje`.
+ * vendasRealizadas representa unidades que reduzem a meta: cada venda paga da
+ * Greenn vale 1, mais cada convidado e cada embaixador. A meta e cumulativa,
+ * portanto nao usa o intervalo de datas selecionado.
  */
 function calcularContagemRegressiva(
   config: AppConfig,
-  data: DataSet,
   filter: MetricsFilter,
   hoje: string,
+  lugaresOcupados: number,
 ): ContagemRegressiva | null {
   const edicao = edicaoEmFoco(config, filter);
   if (!edicao) return null;
   const temData = typeof edicao.dataDoEvento === 'string' && edicao.dataDoEvento !== '';
   const temMeta = typeof edicao.metaDeVendas === 'number';
   if (!temData && !temMeta) return null;
-
-  const vendasRealizadas = (data.greennSales ?? []).filter(
-    (sale) => sale.status === 'paid' && (filter.profileId === null || sale.profileId === filter.profileId),
-  ).length;
 
   const dataDoEvento = temData ? (edicao.dataDoEvento as string) : null;
   const metaDeVendas = temMeta ? (edicao.metaDeVendas as number) : null;
@@ -78,8 +74,8 @@ function calcularContagemRegressiva(
     dataDoEvento,
     diasParaEvento: dataDoEvento ? diffEmDias(dataDoEvento, hoje) : null,
     metaDeVendas,
-    vendasRealizadas,
-    vendasRestantes: metaDeVendas === null ? null : metaDeVendas - vendasRealizadas,
+    vendasRealizadas: lugaresOcupados,
+    vendasRestantes: metaDeVendas === null ? null : metaDeVendas - lugaresOcupados,
   };
 }
 
@@ -220,6 +216,13 @@ export function computeMetrics(
   const officialParticipants = official
     .filter((sale) => sale.status === 'paid')
     .reduce((total, sale) => total + sale.participantsCount, 0);
+  const officialSalesCumulativo = (data.greennSales ?? [])
+    .filter(
+      (sale) =>
+        sale.status === 'paid' &&
+        (filter.profileId === null || sale.profileId === filter.profileId),
+    )
+    .length;
   const greennProfiles = (data.greennProfiles ?? [])
     .filter((profile) => filter.profileId === null || profile.id === filter.profileId)
     .map((profile) => {
@@ -503,7 +506,12 @@ export function computeMetrics(
       fonteCompartilhada,
       participantes,
       custoPorLead,
-      contagemRegressiva: calcularContagemRegressiva(config, data, filter, hoje),
+      contagemRegressiva: calcularContagemRegressiva(
+        config,
+        filter,
+        hoje,
+        officialSalesCumulativo + embaixadores + convidados,
+      ),
       ingressos,
       embaixador: {
         embaixadores,
